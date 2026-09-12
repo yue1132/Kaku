@@ -158,6 +158,34 @@ mod tests {
         drop(dir);
     }
 
+    /// 对话框、toast 与 AI 面板的键必须与代码里的原文逐字一致，否则
+    /// 那句话会悄悄退回英文（多行消息尤其容易写错）。
+    #[test]
+    fn dialog_and_notification_strings_are_translated() {
+        let table = load_table("zh-CN", None);
+        for (source, expected) in [
+            (
+                "Close this pane?\nThe running process in this pane will be terminated.",
+                "关闭此面板？\n面板里正在运行的进程会被终止。",
+            ),
+            (
+                "Quit Kaku?\nAll open tabs and panes will be closed.",
+                "退出 Kaku？\n所有已打开的标签与面板都会关闭。",
+            ),
+            ("[Y] Confirm", "[Y] 确认"),
+            ("[N] Cancel", "[N] 取消"),
+            ("Copied", "已复制"),
+            ("Kaku AI needs confirmation", "Kaku AI 需要确认"),
+            ("  You", "  你"),
+        ] {
+            assert_eq!(
+                table.get(source).map(String::as_str),
+                Some(expected),
+                "翻译缺失或与代码原文不一致：{source:?}"
+            );
+        }
+    }
+
     /// 审计：列出还没翻译的命令标题（上游新增命令后跑一下）。
     /// 默认忽略，用 `--ignored --nocapture` 运行。
     #[test]

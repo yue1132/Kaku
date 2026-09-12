@@ -29,8 +29,12 @@ fn run_confirmation_impl(message: &str, term: &mut TermWizTerminal) -> anyhow::R
     term.set_raw_mode()?;
 
     let size = term.get_screen_size()?;
-    let yes_label = "[Y] Confirm";
-    let no_label = "[N] Cancel";
+    let message = crate::i18n::tr(message);
+    let message = message.as_str();
+    let yes_label = crate::i18n::tr("[Y] Confirm");
+    let yes_label = yes_label.as_str();
+    let no_label = crate::i18n::tr("[N] Cancel");
+    let no_label = no_label.as_str();
     let horizontal_padding = 2;
     let button_gap = 3;
     let max_dialog_width = size.cols.saturating_sub(6).max(4);

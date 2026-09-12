@@ -69,6 +69,8 @@ impl TermWindow {
     }
 
     fn show_toast_internal(&mut self, message: String, lifetime: Duration) {
+        // 所有应用内提示都经过这里，翻译只需一处。
+        let message = crate::i18n::tr(&message);
         let now = Instant::now();
         let fade_after = lifetime.saturating_sub(Duration::from_millis(500));
         self.toast = Some((now, message, lifetime));

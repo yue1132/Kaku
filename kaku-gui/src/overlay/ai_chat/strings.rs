@@ -10,27 +10,27 @@
 /// Matches what `cmd_export` writes as `User:` on disk; the overlay
 /// prefers the shorter "You" because horizontal space is tight.
 pub(crate) fn header_user() -> String {
-    "  You".to_string()
+    crate::i18n::tr("  You")
 }
 
 /// Label printed at the top of an assistant-authored message.
 pub(crate) fn header_assistant() -> String {
-    "  AI".to_string()
+    crate::i18n::tr("  AI")
 }
 
 /// Title shown by the system notification when an approval is required
 /// and the Kaku window is unfocused.
 pub(crate) fn approval_notification_title() -> String {
-    "Kaku AI needs confirmation".to_string()
+    crate::i18n::tr("Kaku AI needs confirmation")
 }
 
 /// Title shown by the system notification when a chat task finishes
 /// while the Kaku window is unfocused.
 pub(crate) fn task_complete_notification_title() -> String {
-    "Kaku AI task complete".to_string()
+    crate::i18n::tr("Kaku AI task complete")
 }
 
 /// Body shown by the task-complete system notification.
 pub(crate) fn task_complete_notification_body() -> String {
-    "The AI has finished responding.".to_string()
+    crate::i18n::tr("The AI has finished responding.")
 }
