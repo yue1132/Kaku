@@ -372,32 +372,30 @@ fn render_transfer_line(app: &App, history: &mut TransferHistory, cols: usize) -
 }
 
 fn render_input_line(app: &App, mode: &InputMode, cols: usize) -> String {
-    match mode {
+    // One exhaustive match on purpose: this used to be an outer match with a
+    // `_ => unreachable!` fallback, so a new input mode panicked the overlay
+    // thread at render time (pressing `/` or `z` froze the panel).  Adding a
+    // variant now fails to compile instead.
+    let text = match mode {
         InputMode::Password { username, prompt } => {
             // Never draw the typed secret; show one bullet per char.
             let masked: String = "●".repeat(app.input_line.chars().count());
-            truncate_visible(
-                &format!("{} for {username}: {masked}_", prompt_title(prompt)),
-                cols,
-            )
+            format!("{} for {username}: {masked}_", prompt_title(prompt))
         }
         InputMode::ConfirmHostKey { message } => {
-            truncate_visible(&format!("{} (y/n): ", message.trim_end()), cols)
+            format!("{} (y/n): ", message.trim_end())
         }
         InputMode::ConfirmOverwrite => {
             let Some(front) = app.pending.first() else {
                 return String::new();
             };
             let resume_hint = if front.resumable() { " [r]esume" } else { "" };
-            truncate_visible(
-                &format!(
-                    "{} exists ({}) - [o]verwrite{} [s]kip [a]ll-ow [x]skip-all ({} left): ",
-                    front.dest,
-                    format_bytes(front.size),
-                    resume_hint,
-                    app.pending.len(),
-                ),
-                cols,
+            format!(
+                "{} exists ({}) - [o]verwrite{} [s]kip [a]ll-ow [x]skip-all ({} left): ",
+                front.dest,
+                format_bytes(front.size),
+                resume_hint,
+                app.pending.len(),
             )
         }
         InputMode::ConfirmFolder { side, name } => {
@@ -409,36 +407,35 @@ fn render_input_line(app: &App, mode: &InputMode, cols: usize) -> String {
                 PanelSide::Local => PanelSide::Remote,
                 PanelSide::Remote => PanelSide::Local,
             };
-            truncate_visible(
-                &format!(
-                    "Transfer folder \"{short}\" to {} recursively (overwrite same names)? y/n: ",
-                    target.label()
-                ),
-                cols,
+            format!(
+                "Transfer folder \"{short}\" to {} recursively (overwrite same names)? y/n: ",
+                target.label()
             )
         }
-        _ => {
-            let prompt = match mode {
-                InputMode::Create { directory } => {
-                    if *directory {
-                        "New directory: ".to_string()
-                    } else {
-                        "New file (end with / for a directory): ".to_string()
-                    }
-                }
-                InputMode::Rename { original } => format!("Rename {original} to: "),
-                InputMode::ConfirmDelete { names } => {
-                    if names.len() == 1 {
-                        format!("Delete {}? (y/n): ", names[0])
-                    } else {
-                        format!("Delete {} items? (y/n): ", names.len())
-                    }
-                }
-                _ => unreachable!("handled above"),
+        InputMode::Create { directory } => {
+            let prompt = if *directory {
+                "New directory: "
+            } else {
+                "New file (end with / for a directory): "
             };
-            truncate_visible(&format!("{}{}_ ", prompt, app.input_line), cols)
+            format!("{prompt}{}_ ", app.input_line)
         }
-    }
+        InputMode::Rename { original } => format!("Rename {original} to: {}_ ", app.input_line),
+        InputMode::ConfirmDelete { names } => {
+            let prompt = if names.len() == 1 {
+                format!("Delete {}? (y/n): ", names[0])
+            } else {
+                format!("Delete {} items? (y/n): ", names.len())
+            };
+            format!("{prompt}{}_ ", app.input_line)
+        }
+        // Live filter and path jump echo what is typed; the jump-to-char
+        // prompt waits for a single letter, so it has no line to show.
+        InputMode::Filter => format!("/{}_ ", app.input_line),
+        InputMode::JumpTo => format!("jump to path: {}_ ", app.input_line),
+        InputMode::JumpToChar => "f jump to a name starting with: _ ".to_string(),
+    };
+    truncate_visible(&text, cols)
 }
 
 /// Capitalize the first letter of an auth prompt for display.
@@ -590,6 +587,54 @@ mod tests {
                 _ => None,
             })
             .collect()
+    }
+
+    /// Every input mode must render.  This used to panic for the filter and
+    /// jump modes (`unreachable!("handled above")`), which killed the overlay
+    /// thread on `/`, `z` and `f`; the match is exhaustive now, and this test
+    /// keeps the paths themselves exercised.
+    #[test]
+    fn every_input_mode_renders() {
+        let modes = [
+            InputMode::Create { directory: false },
+            InputMode::Create { directory: true },
+            InputMode::Rename {
+                original: "a.txt".into(),
+            },
+            InputMode::ConfirmDelete {
+                names: vec!["a.txt".into()],
+            },
+            InputMode::ConfirmDelete {
+                names: vec!["a.txt".into(), "b.txt".into()],
+            },
+            InputMode::Password {
+                username: "u".into(),
+                prompt: "Password".into(),
+            },
+            InputMode::ConfirmHostKey {
+                message: "host".into(),
+            },
+            InputMode::ConfirmFolder {
+                side: PanelSide::Local,
+                name: "/tmp/dir".into(),
+            },
+            InputMode::Filter,
+            InputMode::JumpTo,
+            InputMode::JumpToChar,
+        ];
+        for mode in modes {
+            let mut app = test_app();
+            app.input_line = "typed".into();
+            app.input_mode = Some(mode.clone());
+            let text = render_input_line(&app, app.input_mode.as_ref().unwrap(), 60);
+            assert!(!text.is_empty(), "empty prompt for {:?}", mode);
+        }
+
+        // A conflict prompt with an empty queue renders as nothing.
+        let mut app = test_app();
+        app.input_mode = Some(InputMode::ConfirmOverwrite);
+        let text = render_input_line(&app, app.input_mode.as_ref().unwrap(), 60);
+        assert!(text.is_empty());
     }
 
     /// Every frame has to close its synchronized update.  The key reference
