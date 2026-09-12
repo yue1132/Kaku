@@ -118,6 +118,8 @@ pub type TransferId = u64;
 pub enum Direction {
     Upload,
     Download,
+    /// Remote to remote, e.g. pasting a copied file in the browser.
+    Copy,
 }
 
 impl Direction {
@@ -126,6 +128,7 @@ impl Direction {
         match self {
             Self::Upload => "↑",
             Self::Download => "↓",
+            Self::Copy => "⇄",
         }
     }
 }
@@ -210,6 +213,8 @@ enum WorkerJob {
         remote: Utf8PathBuf,
         resume: bool,
     },
+    /// Copy one remote file to another remote path.
+    RemoteCopy { from: Utf8PathBuf, to: Utf8PathBuf },
     Download {
         remote: Utf8PathBuf,
         local: PathBuf,
@@ -507,6 +512,24 @@ impl TransferManager {
         id
     }
 
+    /// Copy `from` to `to`, both on the remote side.  SFTP has no
+    /// server-side copy, so the bytes stream through this connection.
+    pub fn copy_remote(
+        &self,
+        from: impl Into<Utf8PathBuf>,
+        to: impl Into<Utf8PathBuf>,
+    ) -> TransferId {
+        let (from, to) = (from.into(), to.into());
+        let id = self.register(Direction::Copy, from.as_str(), to.as_str());
+        if self.destination_busy(id, to.as_str()) {
+            self.inner
+                .reject(id, "this file is already being transferred", &self.event_tx);
+            return id;
+        }
+        self.spawn(id, WorkerJob::RemoteCopy { from, to });
+        id
+    }
+
     /// Ask a transfer to stop at the next chunk boundary.  Partial
     /// output files are removed.
     pub fn cancel(&self, id: TransferId) {
@@ -569,6 +592,7 @@ impl TransferManager {
         let name = match &job {
             WorkerJob::Upload { .. } => format!("sftp-upload-{id}"),
             WorkerJob::Download { .. } => format!("sftp-download-{id}"),
+            WorkerJob::RemoteCopy { .. } => format!("sftp-copy-{id}"),
         };
         let spawned = thread::Builder::new().name(name).spawn(move || {
             smol::block_on(async move {
@@ -665,6 +689,21 @@ async fn run_job(
                 &local,
                 &remote,
                 start,
+                &cancel,
+                &mut |bytes| inner.emit_progress(&event_tx, id, bytes, total),
+            )
+            .await
+        }
+        WorkerJob::RemoteCopy { from, to } => {
+            let meta = lane.metadata(from.as_str()).await?;
+            let total = meta.size.unwrap_or(0);
+            inner.emit_progress(&event_tx, id, 0, total);
+            run_remote_copy(
+                &lane,
+                &inner.created_dirs,
+                &from,
+                &to,
+                &meta,
                 &cancel,
                 &mut |bytes| inner.emit_progress(&event_tx, id, bytes, total),
             )
@@ -808,6 +847,42 @@ async fn run_download(
         }
     }
     publish_local(part, local)
+}
+
+/// Copy one remote file onto another remote path.  The reader and the
+/// writer share a connection, so each chunk costs a read round trip plus
+/// a write round trip; that is still far cheaper than routing the bytes
+/// through the local disk.  The destination is published atomically.
+async fn run_remote_copy(
+    sftp: &Sftp,
+    created_dirs: &Mutex<HashSet<String>>,
+    from: &Utf8PathBuf,
+    to: &Utf8PathBuf,
+    meta: &Metadata,
+    cancel: &AtomicBool,
+    on_progress: &mut dyn FnMut(u64),
+) -> Result<(), TransferError> {
+    let part = remote_part(to);
+    ensure_remote_parent(created_dirs, sftp, to).await;
+    let mode = meta
+        .permissions
+        .map(|perms| (perms.to_unix_mode() & 0o777).max(0o600) as i32)
+        .unwrap_or(0o600);
+    let mut reader = sftp.open(from).await?;
+    let mut writer = sftp
+        .open_with_mode(
+            &part,
+            wezterm_ssh::OpenOptions {
+                read: false,
+                write: Some(wezterm_ssh::WriteMode::Write),
+                mode,
+                ty: wezterm_ssh::OpenFileType::File,
+            },
+        )
+        .await?;
+    copy_stream(&mut reader, &mut writer, 0, cancel, on_progress).await?;
+    writer.close().await?;
+    publish_remote(sftp, &part, to).await
 }
 
 /// Create the local directory a download lands in.  A remote tree can

@@ -20,6 +20,40 @@ pub fn target_key(target: &str) -> String {
     target.trim().to_lowercase()
 }
 
+/// Passwords typed during this app run, keyed like the session pool.
+///
+/// A second connection to a password-only host would otherwise ask again
+/// (the pool only helps once a session exists), and every parallel lane
+/// needs its own connection.  Keeping the password in memory until the
+/// app exits is what desktop sftp clients do; it is never written to
+/// disk or logged, and a failed attempt forgets it so the user is asked
+/// again instead of looping on a stale value.
+fn passwords() -> &'static Mutex<HashMap<String, String>> {
+    static PASSWORDS: OnceLock<Mutex<HashMap<String, String>>> = OnceLock::new();
+    PASSWORDS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Take the remembered password for `target`, if any.  Taking it means a
+/// rejected attempt cannot be retried from the same stale value.
+pub fn take_password(target: &str) -> Option<String> {
+    passwords().lock().unwrap().remove(&target_key(target))
+}
+
+/// Remember a password that just worked.
+pub fn remember_password(target: &str, password: &str) {
+    if !password.is_empty() {
+        passwords()
+            .lock()
+            .unwrap()
+            .insert(target_key(target), password.to_string());
+    }
+}
+
+/// Forget the remembered password for `target`.
+pub fn forget_password(target: &str) {
+    passwords().lock().unwrap().remove(&target_key(target));
+}
+
 /// Returns a handle to the pooled session for `target`, if one is live.
 pub fn get(target: &str) -> Option<Session> {
     pool().lock().unwrap().get(&target_key(target)).cloned()
@@ -98,6 +132,7 @@ pub fn connect_noninteractive(target: &str) -> Result<Session, String> {
     let cfg_map = build_config_for_target(user.as_deref(), &host);
     let (session, events) = Session::connect(cfg_map).map_err(|e| e.to_string())?;
 
+    let mut working_password: Option<String> = None;
     let result: Result<Session, String> = smol::block_on(async {
         let deadline = Instant::now() + HELPER_CONNECT_TIMEOUT;
         loop {
@@ -120,8 +155,16 @@ pub fn connect_noninteractive(target: &str) -> Result<Session, String> {
                     // The main session already trusts this host.
                     ev.try_answer(true).map_err(|e| e.to_string())?;
                 }
-                Ok(SessionEvent::Authenticate(_)) => {
-                    return Err("password authentication required".to_string());
+                Ok(SessionEvent::Authenticate(ev)) => {
+                    // A password the user typed for this host earlier in
+                    // the app run lets auxiliary connections (parallel
+                    // transfer lanes) authenticate without prompting.
+                    let Some(password) = take_password(target) else {
+                        return Err("password authentication required".to_string());
+                    };
+                    let answers = vec![password.clone(); ev.prompts.len().max(1)];
+                    ev.answer(answers).await.map_err(|e| e.to_string())?;
+                    working_password = Some(password);
                 }
                 Ok(SessionEvent::HostVerificationFailed(f)) => {
                     return Err(format!("host key verification failed: {}", f.key));
@@ -131,6 +174,11 @@ pub fn connect_noninteractive(target: &str) -> Result<Session, String> {
             }
         }
     });
+    match (&result, &working_password) {
+        (Ok(_), Some(password)) => remember_password(target, password),
+        (Err(_), _) => forget_password(target),
+        _ => {}
+    }
     result
 }
 

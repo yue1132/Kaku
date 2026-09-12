@@ -90,6 +90,7 @@ fn retain_background(manager: TransferManager, expected: usize) {
                         let verb = match status.direction {
                             Direction::Upload => "uploaded",
                             Direction::Download => "downloaded",
+                            Direction::Copy => "copied",
                         };
                         let text = match &status.state {
                             TransferState::Done => format!("{verb} {}", status.dest),

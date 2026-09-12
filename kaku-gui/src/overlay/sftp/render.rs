@@ -58,6 +58,12 @@ pub(crate) fn render(
     changes.push(Change::ClearScreen(termwiz::color::ColorAttribute::Default));
 
     let cols = app.cols.max(20);
+    if app.help {
+        render_help(&mut changes, app, cols);
+        term.render(&changes)?;
+        return Ok(());
+    }
+
     let left_w = cols / 2;
     let right_w = cols - left_w;
     let visible = app.visible_rows();
@@ -162,6 +168,10 @@ fn render_panel(
         }
     } else {
         format!(" {} ", title)
+    };
+    let label = match panel.filter.as_deref() {
+        Some(needle) => format!("{label}/{} ", needle),
+        None => label,
     };
     let border_cell = if focused {
         pal.focused_border_cell()
@@ -414,8 +424,56 @@ fn help_line(app: &App) -> String {
     if app.session.is_none() {
         return "Not connected · j/k move · Tab switch · q quit".to_string();
     }
-    "Tab switch · F5 transfer · D download · Enter open · F2 rename · F7 mkdir · F8 delete · . hidden · q quit"
-        .to_string()
+    let clipboard = match &app.clipboard {
+        Some(clip) if clip.cut => " · CUT ready (p paste)",
+        Some(_) => " · copied (p paste)",
+        None => "",
+    };
+    format!(
+        "y copy · x cut · p paste · / filter · z jump · H/L history · F1 help · \
+         F5 transfer · D download · Enter open{clipboard}"
+    )
+}
+
+/// F1: the full key reference, replaced by the panels while it is open.
+fn render_help(changes: &mut Vec<Change>, app: &App, cols: usize) {
+    let pal = &app.palette;
+    let title = "Kaku SFTP keys";
+    let lines = [
+        "j/k ↑/↓ move            Tab   switch panel",
+        "h/l ←/→ parent / open   Enter open, Space mark",
+        "gg / G  top / bottom    Ctrl+d/u half page",
+        "o open with default app D download to ~/Downloads",
+        "/  or f  filter listing  z jumpto a path",
+        "H / L    back / forward  . show hidden files",
+        "y copy   x cut   p paste",
+        "F5 transfer (folders recurse)   F2 rename",
+        "F7 new folder                   F8 delete",
+        "mouse: click selects, double click opens",
+        "q quit   F1 close this help",
+    ];
+    let width = cols.max(20);
+    let top = border_row('┌', '┐', '─', &format!(" {title} "), width);
+    push_line(changes, 0, 0, &top, &pal.focused_border_cell());
+    for (row, line) in lines.iter().enumerate() {
+        let body = format!("{line:<width$}", width = width.saturating_sub(2));
+        push_bordered_line(
+            changes,
+            row + 1,
+            0,
+            &body[..body.len().min(width.saturating_sub(2))],
+            &pal.plain_cell(),
+            &pal.focused_border_cell(),
+        );
+    }
+    let bottom = border_row('└', '┘', '─', "", width);
+    push_line(
+        changes,
+        lines.len() + 1,
+        0,
+        &bottom,
+        &pal.focused_border_cell(),
+    );
 }
 
 /// Truncate to `width` display columns with an ellipsis marker.

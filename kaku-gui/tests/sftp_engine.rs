@@ -346,6 +346,26 @@ fn upload_then_download_a_nested_tree() {
     }
     assert_all_done(&wait_for_all(&manager));
 
+    // A remote-to-remote copy (the browser's paste) streams through the
+    // connection and publishes atomically like any other transfer.
+    let remote_copy = format!("{remote_root}/blob.copy.bin");
+    manager.copy_remote(format!("{remote_root}/blob.bin"), remote_copy.clone());
+    assert_all_done(&wait_for_all(&manager));
+    let copied = smol::block_on(async {
+        use smol::io::AsyncReadExt;
+        let mut file = sftp.open(remote_copy.as_str()).await.unwrap();
+        let mut out = Vec::new();
+        file.read_to_end(&mut out).await.unwrap();
+        out
+    });
+    assert_eq!(copied, payload, "remote copy content differs");
+    assert!(
+        !sftp_read_dir(&sftp, &remote_root)
+            .iter()
+            .any(|name| name.starts_with(".kaku-part.")),
+        "remote copy left a part file"
+    );
+
     assert_eq!(read_local(&dest.join("top.txt")), b"top\n");
     assert_eq!(read_local(&dest.join("nested/inner/deep.txt")), b"deep\n");
     assert_eq!(read_local(&dest.join("blob.bin")), payload);

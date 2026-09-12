@@ -1,7 +1,9 @@
 //! Keyboard handling for the SFTP overlay.  Yazi-style bindings with
 //! mc-style function keys for file operations.
 
-use super::state::{join_path, parent_path, App, InputMode, OpRequest, PendingTransfer};
+use super::state::{
+    join_path, parent_path, App, Clipboard, InputMode, OpRequest, PendingTransfer, ScanRequest,
+};
 use super::types::PanelSide;
 use termwiz::input::{InputEvent, KeyCode, Modifiers};
 
@@ -105,6 +107,12 @@ fn handle_key(
         return Err(false);
     }
 
+    // The F1 reference is modal: any key dismisses it.
+    if app.help {
+        app.help = false;
+        return Ok(Handled::Consumed);
+    }
+
     // Input-line modes capture plain keys first.
     if app.input_mode.is_some() {
         return handle_input_line(key, app, ctx);
@@ -151,6 +159,57 @@ fn handle_key(
         // reveal it in Finder when it lands.
         KeyCode::Char('D') => {
             download_cursor_to_downloads(app);
+            Ok(Handled::Consumed)
+        }
+        // y/x/p: copy, cut and paste, like yazi.
+        KeyCode::Char('y') => {
+            yank_cursor(app, false);
+            Ok(Handled::Consumed)
+        }
+        KeyCode::Char('x') => {
+            yank_cursor(app, true);
+            Ok(Handled::Consumed)
+        }
+        KeyCode::Char('p') => {
+            paste_clipboard(app, ctx);
+            Ok(Handled::Consumed)
+        }
+        // H/L: walk the directory history.
+        KeyCode::Char('H') => {
+            let panel = app.panel_mut(side);
+            match panel.back() {
+                Some(path) => {
+                    panel.path = path.clone();
+                    ctx.req_tx.send(OpRequest::Ls { side, path }).ok();
+                }
+                None => app.set_message("no earlier directory"),
+            }
+            Ok(Handled::Consumed)
+        }
+        KeyCode::Char('L') => {
+            let panel = app.panel_mut(side);
+            match panel.forward() {
+                Some(path) => {
+                    panel.path = path.clone();
+                    ctx.req_tx.send(OpRequest::Ls { side, path }).ok();
+                }
+                None => app.set_message("no later directory"),
+            }
+            Ok(Handled::Consumed)
+        }
+        // z: type a path to jump to; / and f: filter the listing.
+        KeyCode::Char('z') => {
+            app.input_mode = Some(InputMode::JumpTo);
+            app.input_line.clear();
+            Ok(Handled::Consumed)
+        }
+        KeyCode::Char('/') | KeyCode::Char('f') => {
+            app.input_mode = Some(InputMode::Filter);
+            app.input_line = app.panel(side).filter.clone().unwrap_or_default();
+            Ok(Handled::Consumed)
+        }
+        KeyCode::Function(1) => {
+            app.help = true;
             Ok(Handled::Consumed)
         }
         KeyCode::Char('g') => {
@@ -310,8 +369,8 @@ fn start_front(app: &mut App, resume: bool) {
     let Some(manager) = app.transfers.clone() else {
         return;
     };
-    if let Some(item) = app.pending.first() {
-        start_transfer(&manager, item, resume);
+    if let Some(item) = app.pending.first().cloned() {
+        start_and_note(&manager, app, &item, resume);
     }
     app.pending.remove(0);
 }
@@ -335,24 +394,24 @@ fn handle_confirm_folder(
         return Ok(Handled::Consumed);
     }
     if confirmed {
-        if let Some((side, root)) = app.scan_queue.first().cloned() {
-            ctx.req_tx.send(OpRequest::ScanTree { side, root }).ok();
+        if let Some(request) = app.scan_queue.first().cloned() {
+            ctx.req_tx
+                .send(OpRequest::ScanTree {
+                    side: request.side,
+                    root: request.root,
+                    dest: request.dest,
+                    dest_side: request.dest_side,
+                    cut_source: request.cut_source,
+                })
+                .ok();
         }
     } else {
         app.scan_queue.remove(0);
     }
     if app.scan_queue.is_empty() {
         app.input_mode = None;
-    } else if let Some((_, name)) = app.scan_queue.first() {
-        let name = name
-            .rsplit('/')
-            .find(|s| !s.is_empty())
-            .unwrap_or("")
-            .to_string();
-        app.input_mode = Some(InputMode::ConfirmFolder {
-            side: app.scan_queue[0].0,
-            name,
-        });
+    } else if let Some(request) = app.scan_queue.first() {
+        app.input_mode = Some(folder_prompt(request));
     }
     Ok(Handled::Consumed)
 }
@@ -383,6 +442,87 @@ fn open_cursor_file(app: &mut App, ctx: InputContext<'_>) {
             ctx.req_tx.send(OpRequest::OpenRemote { source, dest }).ok();
             app.set_message(format!("opening {} ...", entry.name));
         }
+    }
+}
+
+/// y/x: remember the marked entries (or the cursor) for a later paste.
+fn yank_cursor(app: &mut App, cut: bool) {
+    let side = app.focus;
+    let targets = app.panel(side).action_targets();
+    if targets.is_empty() {
+        return;
+    }
+    let items: Vec<(String, bool, u64)> = targets
+        .iter()
+        .map(|(_, entry)| {
+            (
+                join_path(&app.panel(side).path, &entry.name),
+                entry.is_dir,
+                entry.size,
+            )
+        })
+        .collect();
+    let count = items.len();
+    let verb = if cut { "cut" } else { "copied" };
+    app.clipboard = Some(Clipboard { side, items, cut });
+    app.set_message(format!("{verb} {count} item(s); p to paste"));
+}
+
+/// p: write the clipboard into the focused panel's directory.  Files go
+/// through the normal transfer queue, so conflicts still prompt; folders
+/// are walked by the worker like F5 does.
+fn paste_clipboard(app: &mut App, ctx: InputContext<'_>) {
+    let Some(clipboard) = app.clipboard.clone() else {
+        app.set_message("nothing to paste (y copies, x cuts)");
+        return;
+    };
+    let dest_side = app.focus;
+    let dest_dir = app.panel(dest_side).path.clone();
+    let direction = direction_between(clipboard.side, dest_side);
+    let mut files = 0usize;
+    for (path, is_dir, size) in &clipboard.items {
+        let Some(name) = path.rsplit('/').find(|part| !part.is_empty()) else {
+            continue;
+        };
+        if *is_dir {
+            app.scan_queue.push(ScanRequest {
+                side: clipboard.side,
+                root: path.clone(),
+                dest: dest_dir.clone(),
+                dest_side,
+                cut_source: clipboard.cut,
+            });
+            continue;
+        }
+        let dest_size = app
+            .panel(dest_side)
+            .entries
+            .iter()
+            .find(|entry| entry.name == name)
+            .map(|entry| entry.size);
+        app.pending.push(PendingTransfer {
+            direction,
+            source: path.clone(),
+            dest: join_path(&dest_dir, name),
+            size: *size,
+            dest_size,
+            cut_source: clipboard.cut,
+        });
+        files += 1;
+    }
+    let folders = app.scan_queue.len();
+    start_ready_transfers(app);
+    // Folder confirmations come from the overlay loop; a paste that only
+    // queued files starts right away.
+    if folders > 0 {
+        let _ = ctx;
+        app.set_message(format!(
+            "{files} file(s) queued, {folders} folder(s) to confirm"
+        ));
+    } else if clipboard.cut {
+        app.set_message(format!("cut {files} item(s) into {dest_dir}"));
+    } else {
+        app.set_message(format!("copied {files} item(s) into {dest_dir}"));
     }
 }
 
@@ -457,8 +597,13 @@ fn transfer_marked(app: &mut App) {
 
     for (_, entry) in &targets {
         if entry.is_dir {
-            app.scan_queue
-                .push((side, join_path(&app.panel(side).path, &entry.name)));
+            app.scan_queue.push(ScanRequest {
+                side,
+                root: join_path(&app.panel(side).path, &entry.name),
+                dest: dest_dir.clone(),
+                dest_side: other,
+                cut_source: false,
+            });
         }
     }
 
@@ -475,18 +620,28 @@ fn transfer_marked(app: &mut App) {
             .find(|e| e.name == entry.name)
             .map(|e| e.size);
         app.pending.push(PendingTransfer {
-            direction: match side {
-                PanelSide::Local => crate::sftp_transfer::Direction::Upload,
-                PanelSide::Remote => crate::sftp_transfer::Direction::Download,
-            },
+            direction: direction_between(side, other),
             source,
             dest,
             size: entry.size,
             dest_size,
+            cut_source: false,
         });
     }
 
     start_ready_transfers(app);
+}
+
+/// Which way a transfer goes between two panels: reading local and
+/// writing remote is an upload, the reverse is a download, and the same
+/// side on both ends is a remote or local copy.
+pub(crate) fn direction_between(from: PanelSide, to: PanelSide) -> crate::sftp_transfer::Direction {
+    use crate::sftp_transfer::Direction;
+    match (from, to) {
+        (PanelSide::Local, PanelSide::Remote) => Direction::Upload,
+        (PanelSide::Remote, PanelSide::Local) => Direction::Download,
+        _ => Direction::Copy,
+    }
 }
 
 /// Move confirmed-start transfers out of the pending queue; park the
@@ -499,15 +654,37 @@ pub(crate) fn start_ready_transfers(app: &mut App) {
     let mut keep: Vec<PendingTransfer> = Vec::new();
     for item in std::mem::take(&mut app.pending) {
         match (item.dest_size.is_some(), app.overwrite_all) {
-            (false, _) => start_transfer(&manager, &item, false),
-            (_, Some(true)) => start_transfer(&manager, &item, false),
+            (false, _) => start_and_note(&manager, app, &item, false),
+            (_, Some(true)) => start_and_note(&manager, app, &item, false),
             (_, Some(false)) => {} // skipped
             (true, None) => keep.push(item),
         }
     }
     app.pending = keep;
-    if !app.pending.is_empty() && app.input_mode.is_none() {
+    if app.input_mode.is_some() {
+        return;
+    }
+    // Conflicts are answered first; then folders waiting for their
+    // recursive-transfer confirmation.  Without this, queueing a folder
+    // left it stuck: the first prompt was never shown.
+    if !app.pending.is_empty() {
         app.input_mode = Some(InputMode::ConfirmOverwrite);
+    } else if let Some(request) = app.scan_queue.first() {
+        app.input_mode = Some(folder_prompt(request));
+    }
+}
+
+/// Confirmation shown before a folder is walked recursively.
+fn folder_prompt(request: &ScanRequest) -> InputMode {
+    let name = request
+        .root
+        .rsplit('/')
+        .find(|part| !part.is_empty())
+        .unwrap_or("")
+        .to_string();
+    InputMode::ConfirmFolder {
+        side: request.side,
+        name,
     }
 }
 
@@ -516,22 +693,48 @@ pub(crate) fn start_ready_transfers(app: &mut App) {
 /// being written, so which one is remote depends on the direction.
 fn transfer_paths(item: &PendingTransfer) -> (String, String) {
     match item.direction {
+        // The engine wants (remote, local); a copy has both on the remote.
         crate::sftp_transfer::Direction::Upload => (item.dest.clone(), item.source.clone()),
         crate::sftp_transfer::Direction::Download => (item.source.clone(), item.dest.clone()),
+        crate::sftp_transfer::Direction::Copy => (item.source.clone(), item.dest.clone()),
     }
+}
+
+/// Start one transfer and remember a cut's source, so a successful copy
+/// can remove it.
+fn start_and_note(
+    manager: &crate::sftp_transfer::TransferManager,
+    app: &mut App,
+    item: &PendingTransfer,
+    resume: bool,
+) {
+    let id = start_transfer(manager, item, resume);
+    if !item.cut_source {
+        return;
+    }
+    // The cut removes what was read: the local file for an upload, the
+    // remote file otherwise.
+    let side = match item.direction {
+        crate::sftp_transfer::Direction::Upload => PanelSide::Local,
+        crate::sftp_transfer::Direction::Download | crate::sftp_transfer::Direction::Copy => {
+            PanelSide::Remote
+        }
+    };
+    app.cut_pending.push((id, side, item.source.clone(), false));
 }
 
 fn start_transfer(
     manager: &crate::sftp_transfer::TransferManager,
     item: &PendingTransfer,
     resume: bool,
-) {
+) -> crate::sftp_transfer::TransferId {
     let (remote, local) = transfer_paths(item);
     // Upload reads the local side, download reads the remote side.
     match item.direction {
         crate::sftp_transfer::Direction::Upload => manager.upload(local, remote, resume),
         crate::sftp_transfer::Direction::Download => manager.download(remote, local, resume),
-    };
+        crate::sftp_transfer::Direction::Copy => manager.copy_remote(remote, local),
+    }
 }
 
 fn handle_input_line(
@@ -546,6 +749,10 @@ fn handle_input_line(
         Some(InputMode::ConfirmHostKey { .. }) => return handle_host_key_line(key, app),
         Some(InputMode::ConfirmOverwrite) => return handle_confirm_overwrite(key, app),
         Some(InputMode::ConfirmFolder { .. }) => return handle_confirm_folder(key, app, ctx),
+        Some(InputMode::JumpTo) => return handle_jump_line(key, app, ctx),
+        Some(InputMode::Filter) => {
+            return handle_filter_line(key, app);
+        }
         _ => {}
     }
     match key.key {
@@ -620,6 +827,98 @@ fn handle_input_line(
         }
         _ => Err(false),
     }
+}
+
+/// `/` or `f`: narrow the listing as the filter is typed.
+fn handle_filter_line(key: &termwiz::input::KeyEvent, app: &mut App) -> Result<Handled, bool> {
+    let side = app.focus;
+    match key.key {
+        KeyCode::Enter => {
+            app.input_mode = None;
+            let kept = app.panel(side).entries.len();
+            app.set_message(format!("{kept} matching entr(y/ies)"));
+        }
+        KeyCode::Escape => {
+            app.input_mode = None;
+            app.input_line.clear();
+            app.panel_mut(side).set_filter(None);
+        }
+        KeyCode::Backspace => {
+            app.input_line.pop();
+            let needle = app.input_line.clone();
+            app.panel_mut(side).set_filter(Some(needle));
+        }
+        KeyCode::Char(c) => {
+            app.input_line.push(c);
+            let needle = app.input_line.clone();
+            app.panel_mut(side).set_filter(Some(needle));
+        }
+        _ => return Err(false),
+    }
+    Ok(Handled::Consumed)
+}
+
+/// `z`: type a directory to jump to, absolute or relative to the pane.
+fn handle_jump_line(
+    key: &termwiz::input::KeyEvent,
+    app: &mut App,
+    ctx: InputContext<'_>,
+) -> Result<Handled, bool> {
+    let side = app.focus;
+    match key.key {
+        KeyCode::Enter => {
+            app.input_mode = None;
+            let line = std::mem::take(&mut app.input_line);
+            let base = app.panel(side).path.clone();
+            match jump_target(&base, &line) {
+                Some(path) => {
+                    app.panel_mut(side).path = path.clone();
+                    ctx.req_tx.send(OpRequest::Ls { side, path }).ok();
+                }
+                None => app.set_error("no directory given"),
+            }
+        }
+        KeyCode::Escape => {
+            app.input_mode = None;
+            app.input_line.clear();
+        }
+        KeyCode::Backspace => {
+            app.input_line.pop();
+        }
+        KeyCode::Char(c) => {
+            app.input_line.push(c);
+        }
+        _ => return Err(false),
+    }
+    Ok(Handled::Consumed)
+}
+
+/// Directory a typed jump lands in, or None for empty input.  Supports
+/// absolute paths, `~`, `.`/`..` and plain relative names.
+pub(crate) fn jump_target(cwd: &str, typed: &str) -> Option<String> {
+    let typed = typed.trim();
+    if typed.is_empty() {
+        return None;
+    }
+    if typed == "~" || typed.starts_with("~/") {
+        let home = dirs_next::home_dir()?;
+        let home = home.to_string_lossy().to_string();
+        return Some(match typed.strip_prefix('~') {
+            Some("") => home,
+            Some(rest) => format!("{home}{rest}"),
+            None => home,
+        });
+    }
+    if typed.starts_with('/') {
+        return Some(typed.to_string());
+    }
+    if typed == "." {
+        return Some(cwd.to_string());
+    }
+    if typed == ".." {
+        return Some(parent_path(cwd));
+    }
+    Some(join_path(cwd, typed))
 }
 
 /// Masked password entry during the ssh handshake.  Enter sends the
@@ -697,7 +996,12 @@ fn handle_mouse(mouse: &termwiz::input::MouseEvent, app: &mut App, ctx: InputCon
     }
 
     let pressed = mouse.mouse_buttons.intersects(B::LEFT);
-    if !pressed || y == 0 || y > app.visible_rows() {
+    // A physical click arrives as a press and then a release, and a drag
+    // keeps reporting the held button: only the false-to-true edge counts
+    // as a click, so dragging never opens the entry under the cursor.
+    let clicked = pressed && !app.mouse_left_down;
+    app.mouse_left_down = pressed;
+    if !clicked || y == 0 || y > app.visible_rows() {
         return false;
     }
 
@@ -728,8 +1032,115 @@ fn handle_mouse(mouse: &termwiz::input::MouseEvent, app: &mut App, ctx: InputCon
 
 #[cfg(test)]
 mod tests {
+    use super::super::types::FileEntry;
     use super::*;
     use crate::sftp_transfer::Direction;
+    use termwiz::color::SrgbaTuple;
+    use termwiz::input::{MouseButtons, MouseEvent};
+
+    fn test_app() -> App {
+        let palette = super::super::types::SftpPalette {
+            bg: SrgbaTuple(0.0, 0.0, 0.0, 1.0),
+            fg: SrgbaTuple(1.0, 1.0, 1.0, 1.0),
+            accent: SrgbaTuple(0.5, 0.5, 0.5, 1.0),
+            border: SrgbaTuple(0.3, 0.3, 0.3, 1.0),
+            header: SrgbaTuple(0.4, 0.4, 0.4, 1.0),
+            dir: SrgbaTuple(0.2, 0.4, 0.8, 1.0),
+        };
+        let mut app = App::new(100, 20, palette, "/tmp".to_string());
+        app.focus = PanelSide::Remote;
+        let panel = app.panel_mut(PanelSide::Remote);
+        panel.path = "/remote".to_string();
+        panel.set_entries(vec![FileEntry {
+            name: "a.txt".into(),
+            is_dir: false,
+            is_symlink: false,
+            size: 1,
+            mode: Some(0o644),
+        }]);
+        app
+    }
+
+    fn row(x: u16, buttons: MouseButtons) -> MouseEvent {
+        MouseEvent {
+            x,
+            y: 1,
+            mouse_buttons: buttons,
+            modifiers: Modifiers::NONE,
+        }
+    }
+
+    /// One physical click reaches the overlay as a press followed by a
+    /// release with no button held (see `mux::termwiztermtab`), so it must
+    /// only select; opening is reserved for a second press.
+    #[test]
+    fn one_click_selects_and_a_second_press_opens() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let ctx = InputContext { req_tx: &tx };
+        let mut app = test_app();
+
+        handle_mouse(&row(60, MouseButtons::LEFT), &mut app, ctx);
+        handle_mouse(&row(60, MouseButtons::NONE), &mut app, ctx);
+        assert!(
+            rx.try_recv().is_err(),
+            "a single click must not open the entry"
+        );
+
+        // A drag keeps reporting the held button; it must not open either.
+        // Clear the double-click window so each phase stands alone.
+        app.last_click = None;
+        handle_mouse(&row(60, MouseButtons::LEFT), &mut app, ctx);
+        handle_mouse(&row(60, MouseButtons::LEFT), &mut app, ctx);
+        handle_mouse(&row(60, MouseButtons::LEFT), &mut app, ctx);
+        handle_mouse(&row(60, MouseButtons::NONE), &mut app, ctx);
+        assert!(rx.try_recv().is_err(), "dragging must not open the entry");
+
+        app.last_click = None;
+        handle_mouse(&row(60, MouseButtons::LEFT), &mut app, ctx);
+        handle_mouse(&row(60, MouseButtons::NONE), &mut app, ctx);
+        handle_mouse(&row(60, MouseButtons::LEFT), &mut app, ctx);
+        assert!(
+            matches!(rx.try_recv(), Ok(OpRequest::OpenRemote { .. })),
+            "a double click must open the entry"
+        );
+    }
+
+    /// Which way a paste goes decides which engine call runs; getting it
+    /// wrong is how the earlier F5 download bug happened.
+    #[test]
+    fn paste_direction_follows_the_two_sides() {
+        use crate::sftp_transfer::Direction;
+        assert_eq!(
+            direction_between(PanelSide::Local, PanelSide::Remote),
+            Direction::Upload
+        );
+        assert_eq!(
+            direction_between(PanelSide::Remote, PanelSide::Local),
+            Direction::Download
+        );
+        assert_eq!(
+            direction_between(PanelSide::Remote, PanelSide::Remote),
+            Direction::Copy
+        );
+        assert_eq!(
+            direction_between(PanelSide::Local, PanelSide::Local),
+            Direction::Copy
+        );
+    }
+
+    #[test]
+    fn jump_target_resolves_paths() {
+        assert_eq!(jump_target("/root/app", "/etc").as_deref(), Some("/etc"));
+        assert_eq!(
+            jump_target("/root/app", "sub/dir").as_deref(),
+            Some("/root/app/sub/dir")
+        );
+        assert_eq!(jump_target("/root/app", "..").as_deref(), Some("/root"));
+        assert_eq!(jump_target("/root/app", ".").as_deref(), Some("/root/app"));
+        assert_eq!(jump_target("/root/app", "   "), None);
+        let home = jump_target("/root/app", "~").unwrap_or_default();
+        assert!(!home.is_empty() && home != "/root/app");
+    }
 
     /// `source`/`dest` name the side being read and the side being
     /// written, so which one is remote flips with the direction.  The
@@ -744,6 +1155,7 @@ mod tests {
             dest: "/remote/a.bin".into(),
             size: 1,
             dest_size: None,
+            cut_source: false,
         };
         assert_eq!(
             transfer_paths(&upload),
@@ -756,6 +1168,7 @@ mod tests {
             dest: "/local/a.bin".into(),
             size: 1,
             dest_size: None,
+            cut_source: false,
         };
         assert_eq!(
             transfer_paths(&download),

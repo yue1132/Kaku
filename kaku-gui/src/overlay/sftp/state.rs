@@ -16,6 +16,13 @@ pub(crate) struct Panel {
     /// Absolute path currently listed.
     pub path: String,
     pub entries: Vec<FileEntry>,
+    /// The last listing, before the text filter narrowed it.
+    pub all_entries: Vec<FileEntry>,
+    /// Case-insensitive substring filter over the listing.
+    pub filter: Option<String>,
+    /// Directories this panel has landed in, for back/forward movement.
+    pub visited: Vec<String>,
+    pub visited_pos: usize,
     /// Cursor index into `entries`.
     pub cursor: usize,
     /// First visible row index into `entries`.
@@ -30,6 +37,10 @@ impl Panel {
         Self {
             path,
             entries: Vec::new(),
+            all_entries: Vec::new(),
+            filter: None,
+            visited: Vec::new(),
+            visited_pos: 0,
             cursor: 0,
             offset: 0,
             marked: HashSet::new(),
@@ -42,14 +53,65 @@ impl Panel {
     }
 
     pub fn set_entries(&mut self, all_entries: Vec<FileEntry>) {
-        self.entries = all_entries
+        let mut kept: Vec<FileEntry> = all_entries
             .into_iter()
             .filter(|e| self.show_hidden || !e.name.starts_with('.'))
             .collect();
-        sort_entries(&mut self.entries);
+        sort_entries(&mut kept);
+        self.all_entries = kept;
+        self.apply_filter();
         self.marked.clear();
         self.cursor = 0;
         self.offset = 0;
+    }
+
+    /// Narrow the listing to entries whose name contains `filter`.
+    pub fn set_filter(&mut self, filter: Option<String>) {
+        self.filter = filter.filter(|f| !f.is_empty());
+        self.apply_filter();
+        self.cursor = 0;
+        self.offset = 0;
+    }
+
+    /// Recompute `entries` from `all_entries` and the active filter.
+    pub fn apply_filter(&mut self) {
+        self.entries = match self.filter.as_deref().map(str::to_lowercase) {
+            Some(needle) => self
+                .all_entries
+                .iter()
+                .filter(|entry| entry.name.to_lowercase().contains(&needle))
+                .cloned()
+                .collect(),
+            None => self.all_entries.clone(),
+        };
+    }
+
+    /// Remember a directory the panel actually landed in.
+    pub fn record_visit(&mut self, path: &str) {
+        if self.visited.get(self.visited_pos).map(String::as_str) == Some(path) {
+            return;
+        }
+        self.visited.truncate(self.visited_pos + 1);
+        self.visited.push(path.to_string());
+        self.visited_pos = self.visited.len() - 1;
+    }
+
+    /// Directory to return to for `H`; None at the start of the history.
+    pub fn back(&mut self) -> Option<String> {
+        if self.visited_pos == 0 {
+            return None;
+        }
+        self.visited_pos -= 1;
+        self.visited.get(self.visited_pos).cloned()
+    }
+
+    /// Directory to move on to for `L`; None at the end of the history.
+    pub fn forward(&mut self) -> Option<String> {
+        if self.visited_pos + 1 >= self.visited.len() {
+            return None;
+        }
+        self.visited_pos += 1;
+        self.visited.get(self.visited_pos).cloned()
     }
 
     /// Toggle hidden files.  The caller refetches the listing so the
@@ -146,6 +208,9 @@ pub(crate) enum OpResult {
     Scanned {
         side: PanelSide,
         root: String,
+        dest: String,
+        dest_side: PanelSide,
+        cut_source: bool,
         files: Result<Vec<ScanFile>, String>,
     },
 }
@@ -160,16 +225,36 @@ pub(crate) struct ScanFile {
     pub size: u64,
 }
 
+/// A folder waiting for the recursive-transfer confirmation.
+#[derive(Clone, Debug)]
+pub(crate) struct ScanRequest {
+    /// Side holding the folder.
+    pub side: PanelSide,
+    /// Absolute path of the folder being copied.
+    pub root: String,
+    /// Directory the contents land in.
+    pub dest: String,
+    /// Side holding that directory.
+    pub dest_side: PanelSide,
+    /// Remove the source tree once the copy lands (a cut).
+    pub cut_source: bool,
+}
+
 /// A background job request handed to the worker thread.
 pub(crate) enum OpRequest {
     Ls {
         side: PanelSide,
         path: String,
     },
-    /// Recursively enumerate files under `root` on `side`.
+    /// Recursively enumerate files under `root` on `side`, to be written
+    /// under `dest` on `dest_side` (the two sides differ for F5, and are
+    /// the same for pasting a copied folder).
     ScanTree {
         side: PanelSide,
         root: String,
+        dest: String,
+        dest_side: PanelSide,
+        cut_source: bool,
     },
     /// Download a remote file to `dest` using the worker's current
     /// session, so opening a file never rides a stale transfer channel.
@@ -228,6 +313,19 @@ pub(crate) enum InputMode {
         side: PanelSide,
         name: String,
     },
+    /// Live substring filter over the current listing (`/` or `f`).
+    Filter,
+    /// Type a path to jump to (`z`).
+    JumpTo,
+}
+
+/// Paths copied or cut in the browser, waiting for a paste.
+#[derive(Clone, Debug)]
+pub(crate) struct Clipboard {
+    pub side: PanelSide,
+    /// (absolute path, is directory, size)
+    pub items: Vec<(String, bool, u64)>,
+    pub cut: bool,
 }
 
 /// A transfer waiting for an overwrite decision.
@@ -240,6 +338,8 @@ pub(crate) struct PendingTransfer {
     pub size: u64,
     /// Size of the existing destination file, if any.
     pub dest_size: Option<u64>,
+    /// The source is removed once this transfer lands (a cut).
+    pub cut_source: bool,
 }
 
 impl PendingTransfer {
@@ -272,13 +372,24 @@ pub(crate) struct App {
     /// Transfers waiting for an overwrite decision.
     pub pending: Vec<PendingTransfer>,
     /// Folders awaiting a recursive-transfer confirmation (side, path).
-    pub scan_queue: Vec<(PanelSide, String)>,
+    pub scan_queue: Vec<ScanRequest>,
     /// Applied-to-all overwrite decision: Some(true) = overwrite every
     /// remaining conflict, Some(false) = skip them all.
     pub overwrite_all: Option<bool>,
+    /// Whether the left mouse button was held by the previous mouse event.
+    /// A click is the false-to-true edge of this, so a drag (press, moves,
+    /// release) counts once and the release never counts.
+    pub mouse_left_down: bool,
     /// A download to the user's download folder: reveal it in Finder
     /// when the transfer with this id finishes.
     pub pending_reveal: Option<(u64, PathBuf)>,
+    /// F1 key reference is on screen.
+    pub help: bool,
+    /// Paths yanked with `y`/`x`, waiting for `p`.
+    pub clipboard: Option<Clipboard>,
+    /// Transfers that should remove their source once they land (a cut).
+    /// (transfer id, side, path, is_dir)
+    pub cut_pending: Vec<(u64, PanelSide, String, bool)>,
     pub quit: bool,
     pub pending_g: bool,
 }
@@ -308,6 +419,10 @@ impl App {
             pending: Vec::new(),
             scan_queue: Vec::new(),
             overwrite_all: None,
+            mouse_left_down: false,
+            help: false,
+            clipboard: None,
+            cut_pending: Vec::new(),
             pending_reveal: None,
             last_click: None,
             quit: false,
@@ -448,7 +563,13 @@ pub(crate) fn spawn_worker(
                             stamp,
                         });
                     }
-                    OpRequest::ScanTree { side, root } => {
+                    OpRequest::ScanTree {
+                        side,
+                        root,
+                        dest,
+                        dest_side,
+                        cut_source,
+                    } => {
                         let files = match side {
                             PanelSide::Local => scan_local_tree(&root),
                             PanelSide::Remote => match session_slot.lock().unwrap().clone() {
@@ -464,7 +585,14 @@ pub(crate) fn spawn_worker(
                                 None => Err("not connected".to_string()),
                             },
                         };
-                        let _ = tx.send(OpResult::Scanned { side, root, files });
+                        let _ = tx.send(OpResult::Scanned {
+                            side,
+                            root,
+                            dest,
+                            dest_side,
+                            cut_source,
+                            files,
+                        });
                     }
                     OpRequest::Ls { side, path } => {
                         // An empty remote path resolves to the remote
@@ -657,12 +785,20 @@ fn connect_session(
             }
         })?;
     let mut auth_attempts = 0usize;
+    // Password that authenticated this connection, remembered for other
+    // connections to the same host for the rest of the app run.
+    let mut working_password: Option<String> = None;
     loop {
         let event = event_rx
             .recv_timeout(std::time::Duration::from_secs(30))
             .map_err(|_| anyhow::anyhow!("timed out connecting to {target}"))?;
         match event {
-            SessionEvent::Authenticated => break,
+            SessionEvent::Authenticated => {
+                if let Some(password) = &working_password {
+                    crate::sftp_sessions::remember_password(target, password);
+                }
+                break;
+            }
             SessionEvent::Banner(_) => {}
             SessionEvent::HostVerify(ev) => {
                 let (reply_tx, reply_rx) = std::sync::mpsc::channel();
@@ -675,34 +811,51 @@ fn connect_session(
             }
             SessionEvent::Authenticate(ev) => {
                 auth_attempts += 1;
-                let base_prompt = ev
-                    .prompts
-                    .first()
-                    .map(|p| p.prompt.trim_end_matches(':').to_string())
-                    .unwrap_or_else(|| "Password".to_string());
-                let prompt = if auth_attempts > 1 {
-                    format!("{base_prompt} (attempt {auth_attempts})")
-                } else {
-                    base_prompt
+                // A password typed earlier in this app run answers
+                // without another prompt; it was only removed from the
+                // cache, so a rejection falls through to asking.
+                let answered = match crate::sftp_sessions::take_password(target) {
+                    Some(password) => Some(password),
+                    None => {
+                        let base_prompt = ev
+                            .prompts
+                            .first()
+                            .map(|p| p.prompt.trim_end_matches(':').to_string())
+                            .unwrap_or_else(|| "Password".to_string());
+                        let prompt = if auth_attempts > 1 {
+                            format!("{base_prompt} (attempt {auth_attempts})")
+                        } else {
+                            base_prompt
+                        };
+                        let (reply_tx, reply_rx) = std::sync::mpsc::channel();
+                        let _ = tx.send(OpResult::NeedsAuth {
+                            username: ev.username.clone(),
+                            prompt,
+                            reply: reply_tx,
+                        });
+                        // The overlay returns None when the user
+                        // cancels; an empty vec then lets the handshake
+                        // fail cleanly.
+                        match reply_rx.recv_timeout(USER_PROMPT_TIMEOUT) {
+                            Ok(Some(password)) => Some(password),
+                            _ => None,
+                        }
+                    }
                 };
-                let (reply_tx, reply_rx) = std::sync::mpsc::channel();
-                let _ = tx.send(OpResult::NeedsAuth {
-                    username: ev.username.clone(),
-                    prompt,
-                    reply: reply_tx,
-                });
-                // The overlay returns None when the user cancels; an
-                // empty vec then lets the handshake fail cleanly.
                 // Multi-prompt keyboard-interactive challenges are rare
                 // for password servers; fill every prompt with the one
-                // typed answer.
-                let answers: Vec<String> = match reply_rx.recv_timeout(USER_PROMPT_TIMEOUT) {
-                    Ok(Some(password)) => vec![password; ev.prompts.len().max(1)],
-                    _ => Vec::new(),
+                // answer.
+                let answers: Vec<String> = match &answered {
+                    Some(password) => vec![password.clone(); ev.prompts.len().max(1)],
+                    None => Vec::new(),
                 };
+                if answered.is_some() {
+                    working_password = answered;
+                }
                 ev.try_answer(answers).ok();
             }
             SessionEvent::HostVerificationFailed(failed) => {
+                crate::sftp_sessions::forget_password(target);
                 return Err(anyhow::anyhow!(
                     "host key verification failed for {}: {}",
                     failed.remote_address,
@@ -931,6 +1084,62 @@ mod tests {
         let message = describe_local_error("/nope", &err);
         assert!(message.contains("/nope"), "{}", message);
         assert!(!message.contains("System Settings"), "{}", message);
+    }
+
+    /// The filter narrows the listing without touching the server, so a
+    /// second filter or a cleared one always sees the full set again.
+    #[test]
+    fn filter_narrows_and_restores_the_listing() {
+        let mut panel = Panel::new("/tmp".to_string());
+        panel.set_entries(vec![
+            entry("alpha.txt", false),
+            entry("beta.txt", false),
+            entry("Gamma.md", false),
+            entry("dir", true),
+        ]);
+        assert_eq!(panel.entries.len(), 4);
+
+        panel.set_filter(Some("eta".to_string()));
+        assert_eq!(names(&panel), vec!["beta.txt"]);
+
+        // Case-insensitive, and matching anywhere in the name.
+        panel.set_filter(Some("mma".to_string()));
+        assert_eq!(names(&panel), vec!["Gamma.md"]);
+
+        panel.set_filter(None);
+        assert_eq!(panel.entries.len(), 4);
+    }
+
+    #[test]
+    fn history_walks_back_and_forward() {
+        let mut panel = Panel::new("/a".to_string());
+        panel.record_visit("/a");
+        panel.record_visit("/a/b");
+        panel.record_visit("/a/b/c");
+
+        assert_eq!(panel.back().as_deref(), Some("/a/b"));
+        assert_eq!(panel.back().as_deref(), Some("/a"));
+        assert_eq!(panel.back(), None);
+        assert_eq!(panel.forward().as_deref(), Some("/a/b"));
+
+        // Visiting somewhere new drops the forward branch.
+        panel.record_visit("/a/x");
+        assert_eq!(panel.forward(), None);
+        assert_eq!(panel.back().as_deref(), Some("/a/b"));
+    }
+
+    fn entry(name: &str, is_dir: bool) -> FileEntry {
+        FileEntry {
+            name: name.to_string(),
+            is_dir,
+            is_symlink: false,
+            size: 1,
+            mode: Some(0o644),
+        }
+    }
+
+    fn names(panel: &Panel) -> Vec<String> {
+        panel.entries.iter().map(|e| e.name.clone()).collect()
     }
 
     #[test]

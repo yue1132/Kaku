@@ -1628,8 +1628,8 @@ pub fn derive_command_from_key_assignment(action: &KeyAssignment) -> Option<Comm
             } else if name == "kaku-open-remote-files" {
                 CommandDef {
                     brief: "Remote Files (sshfs)".into(),
-                    doc: "Open the current SSH domain in a local Yazi tab".into(),
-                    keys: vec![],
+                    doc: "Mount the current SSH host with sshfs and browse it in Yazi".into(),
+                    keys: vec![(Modifiers::SUPER.union(Modifiers::SHIFT), "m".into())],
                     args: &[ArgType::ActiveWindow],
                     menubar: &["Shell"],
                     icon: None,

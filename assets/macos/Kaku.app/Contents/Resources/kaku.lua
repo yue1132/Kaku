@@ -4546,6 +4546,14 @@ config.keys = (function() return {
     action = wezterm.action.EmitEvent('kaku-sftp'),
   },
 
+  -- Cmd+Shift+M: mount the pane's SSH host with sshfs and browse it in yazi.
+  -- Requires sshfs (macFUSE) and key or agent authentication.
+  {
+    key = 'M',
+    mods = 'CMD|SHIFT',
+    action = wezterm.action.EmitEvent('kaku-open-remote-files'),
+  },
+
   -- Window Controls
   -- Cmd+Ctrl+F: toggle fullscreen
   {

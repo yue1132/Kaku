@@ -171,7 +171,10 @@ pub fn sftp_overlay(
                     if panel.path == path || panel.path.is_empty() {
                         panel.path = path.clone();
                         match entries {
-                            Ok(list) => panel.set_entries(list),
+                            Ok(list) => {
+                                panel.set_entries(list);
+                                panel.record_visit(&path);
+                            }
                             Err(err) => {
                                 log::error!("sftp overlay: cannot list {side:?} {path}: {err}");
                                 let lower = err.to_lowercase();
@@ -225,21 +228,25 @@ pub fn sftp_overlay(
                         app.set_error(format!("open failed: {err}"));
                     }
                 },
-                OpResult::Scanned { side, root, files } => match files {
+                OpResult::Scanned {
+                    side,
+                    root,
+                    dest,
+                    dest_side,
+                    cut_source,
+                    files,
+                } => match files {
                     Ok(list) => {
-                        let dest_dir = app.panel(side.other()).path.clone();
-                        let direction = match side {
-                            PanelSide::Local => crate::sftp_transfer::Direction::Upload,
-                            PanelSide::Remote => crate::sftp_transfer::Direction::Download,
-                        };
+                        let direction = input::direction_between(side, dest_side);
                         let count = list.len();
                         for f in list {
                             app.pending.push(state::PendingTransfer {
                                 direction,
                                 source: f.abs,
-                                dest: state::join_path(&dest_dir, &f.rel),
+                                dest: state::join_path(&dest, &f.rel),
                                 size: f.size,
                                 dest_size: None,
+                                cut_source,
                             });
                         }
                         app.set_message(format!("queued {count} files from {root}"));
@@ -274,6 +281,15 @@ pub fn sftp_overlay(
                         }
                     }
                     history.forget(status.id);
+                    // A cut removes its source once the copy landed.
+                    if let Some(index) =
+                        app.cut_pending.iter().position(|(id, ..)| *id == status.id)
+                    {
+                        let (_, side, path, is_dir) = app.cut_pending.remove(index);
+                        if matches!(status.state, crate::sftp_transfer::TransferState::Done) {
+                            req_tx.send(OpRequest::Delete { side, path, is_dir }).ok();
+                        }
+                    }
                     if let Some((id, path)) = app.pending_reveal.clone() {
                         if id == status.id {
                             app.pending_reveal = None;
@@ -291,6 +307,8 @@ pub fn sftp_overlay(
                     let side = match status.direction {
                         crate::sftp_transfer::Direction::Upload => PanelSide::Remote,
                         crate::sftp_transfer::Direction::Download => PanelSide::Local,
+                        // A copy lands on the remote side.
+                        crate::sftp_transfer::Direction::Copy => PanelSide::Remote,
                     };
                     if app.session.is_some() {
                         let path = app.panel(side).path.clone();
