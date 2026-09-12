@@ -2864,7 +2864,7 @@ local function open_remote_files(window, pane)
   if not mount_accepts_writes(mount_path) then
     show_remote_files_toast(
       window,
-      "Mounted read-only: this sshfs build cannot write here. Use Cmd+Shift+R for the built-in browser.",
+      "Mounted read-only: this sshfs build cannot write here. Use Cmd+Option+R for the built-in browser.",
       9000
     )
   end
@@ -4586,10 +4586,11 @@ config.keys = (function() return {
     action = wezterm.action.EmitEvent('kaku-launch-yazi'),
   },
 
-  -- Cmd+Shift+R: native SFTP dual-pane browser over the pane's SSH session
+  -- Cmd+Option+R: native SFTP dual-pane browser over the pane's SSH session.
+  -- Not Cmd+Shift+R: that is Reload Configuration.
   {
     key = 'R',
-    mods = 'CMD|SHIFT',
+    mods = 'CMD|ALT',
     action = wezterm.action.EmitEvent('kaku-sftp'),
   },
 

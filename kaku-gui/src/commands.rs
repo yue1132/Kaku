@@ -1620,7 +1620,10 @@ pub fn derive_command_from_key_assignment(action: &KeyAssignment) -> Option<Comm
                 CommandDef {
                     brief: "SFTP File Browser".into(),
                     doc: "Browse and transfer files over the current SSH connection".into(),
-                    keys: vec![(Modifiers::SUPER.union(Modifiers::SHIFT), "r".into())],
+                    // Cmd+Option+R, not Cmd+Shift+R: the latter is Reload
+                    // Configuration, and two defaults on one chord means
+                    // one of them is silently unreachable.
+                    keys: vec![(Modifiers::SUPER.union(Modifiers::ALT), "r".into())],
                     args: &[ArgType::ActiveWindow],
                     menubar: &["Shell"],
                     icon: None,
@@ -2755,7 +2758,73 @@ mod tests {
     use super::{derive_command_from_key_assignment, CommandDef};
     use config::keyassignment::KeyAssignment;
     use config::ConfigHandle;
-    use window::Modifiers;
+    use window::{KeyCode, Modifiers};
+
+    /// A command that lives in a menu turns its chord into an AppKit key
+    /// equivalent, which swallows that chord before any pane sees it.  Kaku
+    /// documents Cmd+Shift+R for reloading the configuration, so no menu
+    /// command may take it (the SFTP browser did, which is why it moved to
+    /// Cmd+Option+R).
+    #[test]
+    fn menu_commands_stay_off_the_reload_chord() {
+        let config = ConfigHandle::default_config();
+        for cmd in CommandDef::expanded_commands(&config) {
+            if cmd.menubar.is_empty() {
+                continue;
+            }
+            for (mods, key) in &cmd.keys {
+                let bare = mods.remove_positional_mods();
+                let is_reload_chord = matches!(key, KeyCode::Char('r') | KeyCode::Char('R'))
+                    && bare.contains(Modifiers::SUPER)
+                    && bare.contains(Modifiers::SHIFT);
+                assert!(
+                    !is_reload_chord,
+                    "{} takes Cmd+Shift+R, the configuration reload chord",
+                    cmd.brief
+                );
+            }
+        }
+    }
+
+    /// Two commands on one default chord means one of them is silently
+    /// unreachable, whichever the key map registers last: Cmd+Shift+R was
+    /// both "Reload Configuration" and the SFTP browser, so reloading the
+    /// config from the keyboard quietly stopped working.
+    ///
+    /// Chords are normalized the way the config does it, so `SHIFT+Char('t')`
+    /// and `Char('T')` count as the same chord.
+    ///
+    /// The three entries below predate this guard.  Each needs a user-visible
+    /// decision (which command keeps the chord), so they are named here
+    /// rather than silently tolerated; any other shared chord fails.
+    const KNOWN_SHARED_CHORDS: &[&str] = &[
+        // "Restore Previous Window" vs "Move Pane to New Tab".
+        "ALT | SUPER+Char('T')",
+        // "Reopen Last Closed Tab" vs "Activate Last Tab".
+        "SUPER+Char('T')",
+        // AI chat (config default) vs "Kaku Doctor" (Rust default); the one
+        // registered later wins, so one of them is unreachable today.
+        "CTRL+Char('L')",
+    ];
+
+    #[test]
+    fn default_chords_are_not_shared() {
+        let config = ConfigHandle::default_config();
+        let mut seen: std::collections::HashMap<String, KeyAssignment> =
+            std::collections::HashMap::new();
+        let mut shared: Vec<String> = Vec::new();
+        for (mods, key, action) in CommandDef::default_key_assignments(&config) {
+            let (key, mods) = key.normalize_shift(mods);
+            let chord = format!("{mods:?}+{key:?}");
+            if let Some(previous) = seen.get(&chord) {
+                if previous != &action && !KNOWN_SHARED_CHORDS.contains(&chord.as_str()) {
+                    shared.push(format!("{chord} -> {previous:?} and {action:?}"));
+                }
+            }
+            seen.insert(chord, action);
+        }
+        assert!(shared.is_empty(), "shared default chords: {:?}", shared);
+    }
 
     #[test]
     fn deprecated_input_broadcast_actions_are_not_exposed() {

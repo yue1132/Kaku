@@ -135,7 +135,7 @@ This is a known interaction between trackpad scroll and Claude Code's streaming 
 
 ## Cmd+Shift+Y sends a local path when inside an SSH session.
 
-The yazi remote-files feature (`Cmd+Shift+R`) is designed for SSH sessions and mounts the remote filesystem via sshfs. `Cmd+Shift+Y` is for local yazi. Use `Cmd+Shift+R` when you are inside an SSH pane.
+The yazi remote-files feature (`Cmd+Shift+M`) is designed for SSH sessions and mounts the remote filesystem via sshfs. `Cmd+Shift+Y` is for local yazi. Use `Cmd+Option+R` inside an SSH pane for the built-in browser; `Cmd+Shift+M` needs key or agent authentication.
 
 ## Kaku's prompt shows up in other terminals, or is missing from them.
 

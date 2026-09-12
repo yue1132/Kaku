@@ -1,6 +1,6 @@
 //! SFTP dual-pane file browser overlay.
 //!
-//! Activated via Cmd+Shift+R on an SSH pane.  Left pane browses the
+//! Activated via Cmd+Option+R on an SSH pane.  Left pane browses the
 //! local filesystem, right pane the remote host over the pane's live
 //! ssh session (SSH: domains) or a freshly connected one (ssh CLI
 //! panes, agent/key auth).  File operations run on a worker thread;
