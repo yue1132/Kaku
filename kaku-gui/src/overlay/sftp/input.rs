@@ -281,7 +281,14 @@ fn handle_key(
             app.pending_c = false;
             Ok(Handled::Consumed)
         }
-        KeyCode::Char('/') | KeyCode::Char('F') => {
+        // Plain `/` filters; a shifted `/` (which is how some layouts and
+        // IMEs deliver `?`) opens the key reference below.
+        KeyCode::Char('/') if !key.modifiers.contains(Modifiers::SHIFT) => {
+            app.input_mode = Some(InputMode::Filter);
+            app.input_line = app.panel(side).filter.clone().unwrap_or_default();
+            Ok(Handled::Consumed)
+        }
+        KeyCode::Char('F') => {
             app.input_mode = Some(InputMode::Filter);
             app.input_line = app.panel(side).filter.clone().unwrap_or_default();
             Ok(Handled::Consumed)
@@ -291,9 +298,17 @@ fn handle_key(
             app.input_line.clear();
             Ok(Handled::Consumed)
         }
-        // F1 and ?: the full key reference (any key closes it).
+        // F1 and ?: the full key reference (any key closes it).  `?` also
+        // arrives as a shifted `/` from some keyboards and IMEs, so both
+        // spellings are accepted.
         KeyCode::Function(1) | KeyCode::Char('?') => {
             app.help = true;
+            log::info!("sftp overlay: key reference opened");
+            Ok(Handled::Consumed)
+        }
+        KeyCode::Char('/') => {
+            app.help = true;
+            log::info!("sftp overlay: key reference opened (? as shifted /)");
             Ok(Handled::Consumed)
         }
         KeyCode::Char('g') => {
@@ -1626,6 +1641,49 @@ mod tests {
             rx.try_recv(),
             Ok(OpRequest::Create { path, is_dir: true, .. }) if path == "/remote/plain"
         ));
+    }
+
+    /// Some keyboards and IMEs deliver `?` as a shifted `/`, and a
+    /// composed `?` arrives as pasted text: all three must reach the key
+    /// reference (this is what made "press ? and nothing happens").
+    #[test]
+    fn question_mark_reaches_the_help_from_every_spelling() {
+        for (key, modifiers) in [
+            (KeyCode::Char('?'), Modifiers::NONE),
+            (KeyCode::Char('?'), Modifiers::SHIFT),
+            (KeyCode::Char('/'), Modifiers::SHIFT),
+        ] {
+            let mut app = test_app();
+            let (tx, _rx) = std::sync::mpsc::channel();
+            let ctx = InputContext { req_tx: &tx };
+            handle_key(&termwiz::input::KeyEvent { key, modifiers }, &mut app, ctx).unwrap();
+            assert!(
+                app.help,
+                "{:?} with {:?} did not open the help",
+                key, modifiers
+            );
+        }
+
+        // A composed `?` arrives as pasted text in the overlay pane.
+        let mut app = test_app();
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let ctx = InputContext { req_tx: &tx };
+        handle_input(&InputEvent::Paste("?".to_string()), &mut app, ctx);
+        assert!(app.help, "a composed ? did not open the help");
+    }
+
+    /// Plain `/` still filters, and Shift+/ must not be treated as one.
+    #[test]
+    fn plain_slash_still_filters() {
+        let mut app = test_app();
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let ctx = InputContext { req_tx: &tx };
+        let press =
+            |key: KeyCode, modifiers: Modifiers| termwiz::input::KeyEvent { key, modifiers };
+
+        handle_key(&press(KeyCode::Char('/'), Modifiers::NONE), &mut app, ctx).unwrap();
+        assert!(matches!(app.input_mode, Some(InputMode::Filter)));
+        assert!(!app.help);
     }
 
     /// `?` opens the key reference, and any key closes it again.
