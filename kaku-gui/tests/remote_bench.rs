@@ -146,7 +146,7 @@ fn bench_remote_engine() {
     std::fs::write(&big, &payload).unwrap();
     let remote_big = format!("{remote}/big.bin");
     let start = Instant::now();
-    manager.upload(big.clone(), remote_big.clone(), false);
+    manager.upload(big.clone(), remote_big.clone(), false, true);
     check_done(&wait_all(&manager));
     let up = 64.0 / start.elapsed().as_secs_f64();
     eprintln!("BENCH upload 64MiB: {up:.1} MB/s");
@@ -172,7 +172,7 @@ fn bench_remote_engine() {
     for i in 0..COUNT {
         let local = small.join(format!("f{i}.txt"));
         let remote_file = format!("{remote}/small/f{i}.txt");
-        ids.push(manager.upload(local, remote_file, false));
+        ids.push(manager.upload(local, remote_file, false, true));
     }
     assert_eq!(ids.len(), COUNT);
     let mut remaining = COUNT;
@@ -248,7 +248,7 @@ fn bench_multi_session_small_files() {
         let lane = i % lanes;
         let local = small.join(format!("f{i}.txt"));
         let remote_file = format!("{remote}/f{i}.txt");
-        managers[lane].upload(local, remote_file, false);
+        managers[lane].upload(local, remote_file, false, true);
         counts[lane] += 1;
     }
     let deadline = Instant::now() + Duration::from_secs(900);

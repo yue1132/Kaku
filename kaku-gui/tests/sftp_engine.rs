@@ -291,7 +291,7 @@ fn upload_then_download_a_nested_tree() {
         (blob.clone(), format!("{remote_root}/blob.bin")),
     ];
     for (local, remote) in &uploads {
-        manager.upload(local.clone(), remote.clone(), false);
+        manager.upload(local.clone(), remote.clone(), false, true);
     }
     assert_all_done(&wait_for_all(&manager));
 
@@ -403,11 +403,11 @@ fn small_upload_uses_four_round_trips() {
     // Warm up: the first upload also probes the parent directories and
     // initializes the sftp subsystem, which are one-off costs.
     let manager = TransferManager::new(session.clone());
-    manager.upload(src.clone(), remote.clone(), false);
+    manager.upload(src.clone(), remote.clone(), false, true);
     assert_all_done(&wait_for_all(&manager));
 
     let before = channel_writes();
-    manager.upload(src.clone(), remote.clone(), false);
+    manager.upload(src.clone(), remote.clone(), false, true);
     assert_all_done(&wait_for_all(&manager));
     // The manager's own worker thread has finished by now, so the packet
     // count is stable.
@@ -417,7 +417,7 @@ fn small_upload_uses_four_round_trips() {
     // Uploading again over the same path must not add a setstat or an
     // fsync: the mode rides on OPEN and the writes are already acked.
     let before = channel_writes();
-    manager.upload(src.clone(), remote.clone(), false);
+    manager.upload(src.clone(), remote.clone(), false, true);
     assert_all_done(&wait_for_all(&manager));
     std::thread::sleep(Duration::from_millis(200));
     let sent_again = channel_writes() - before;
@@ -495,4 +495,81 @@ fn create_file_and_directory_on_the_remote() {
     let made_dir = work.path().join("made");
     kaku_gui_lib::sftp_transfer::create_local(&made_dir.display().to_string(), true).unwrap();
     assert!(made_dir.is_dir());
+}
+
+/// A Finder drop must never replace a remote file that is already there:
+/// dragging a file onto one with the same name fails loudly instead of
+/// silently clobbering it.
+#[test]
+fn a_drop_never_clobbers_an_existing_remote_file() {
+    if !sshd_available() {
+        eprintln!("skipping: no sshd binary");
+        return;
+    }
+    let Some(server) = Server::spawn() else {
+        eprintln!("skipping: could not start sshd");
+        return;
+    };
+    let Some(session) = server.connect() else {
+        eprintln!("skipping: could not authenticate against the test sshd");
+        return;
+    };
+    let sftp = session.sftp();
+    let root = format!("{}", server.tmp.path().join("noclobber").display());
+    smol::block_on(async {
+        sftp.create_dir(&root, 0o755).await.unwrap();
+    });
+
+    // The status of one transfer, once everything has settled.
+    fn state_of(manager: &TransferManager, id: u64) -> TransferState {
+        manager
+            .statuses()
+            .into_iter()
+            .find(|status| status.id == id)
+            .map(|status| status.state)
+            .expect("transfer status")
+    }
+
+    let work = TempDir::new().unwrap();
+    let first = work.path().join("first.txt");
+    std::fs::write(&first, b"keep me").unwrap();
+    let second = work.path().join("second.txt");
+    std::fs::write(&second, b"replacement").unwrap();
+    let remote = format!("{root}/same.txt");
+
+    let manager = TransferManager::new(session.clone());
+    let id = manager.upload(first.clone(), remote.clone(), false, true);
+    wait_for_all(&manager);
+    assert_eq!(state_of(&manager, id), TransferState::Done);
+
+    // Not allowed to overwrite: the transfer fails and the file is intact.
+    let id = manager.upload(second.clone(), remote.clone(), false, false);
+    wait_for_all(&manager);
+    match state_of(&manager, id) {
+        TransferState::Failed(err) => {
+            assert!(err.contains("already exists"), "unexpected error: {}", err);
+        }
+        other => panic!("clobber attempt was not refused: {:?}", other),
+    }
+    let content = smol::block_on(async {
+        use smol::io::AsyncReadExt;
+        let mut file = sftp.open(remote.as_str()).await.unwrap();
+        let mut out = Vec::new();
+        file.read_to_end(&mut out).await.unwrap();
+        out
+    });
+    assert_eq!(content, b"keep me", "the original remote file was replaced");
+
+    // With permission the same upload replaces it, and leaves nothing behind.
+    let id = manager.upload(second, remote.clone(), false, true);
+    wait_for_all(&manager);
+    assert_eq!(state_of(&manager, id), TransferState::Done);
+    let names = sftp_read_dir(&sftp, &root);
+    assert!(
+        !names
+            .iter()
+            .any(|name| name.starts_with(".kaku-part.") || name.ends_with(".kaku-old")),
+        "publish left temporary files: {:?}",
+        names
+    );
 }

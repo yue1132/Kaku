@@ -54,14 +54,14 @@ fn upload(session: wezterm_ssh::Session, label: String, hint: Option<String>, pa
                 Ok(files) => {
                     for file in files {
                         let dest = crate::overlay::sftp::join_path(&dest, &file.rel);
-                        manager.upload(file.abs, dest, false);
+                        manager.upload(file.abs, dest, false, false);
                         queued += 1;
                     }
                 }
                 Err(err) => notify(&format!("cannot read {}: {err}", path.display())),
             }
         } else if path.is_file() {
-            manager.upload(path.clone(), dest, false);
+            manager.upload(path.clone(), dest, false, false);
             queued += 1;
         }
     }

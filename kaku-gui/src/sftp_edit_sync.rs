@@ -55,7 +55,10 @@ fn stat_of(path: &Path) -> Option<Stat> {
             .ok()?
             .duration_since(std::time::UNIX_EPOCH)
             .ok()?
-            .as_secs(),
+            // Nanoseconds: a second-precision mtime makes a quick second
+            // save with an unchanged size look like no change at all, and
+            // the edit would never be uploaded.
+            .as_nanos() as u64,
     })
 }
 

@@ -82,22 +82,68 @@ pub(crate) async fn publish_remote(
     part: &Utf8PathBuf,
     dest: &Utf8PathBuf,
 ) -> Result<(), TransferError> {
-    if sftp
-        .rename(part, dest, wezterm_ssh::RenameOptions::default())
-        .await
-        .is_ok()
-    {
+    let rename = |from: &str, to: &str| {
+        let (from, to) = (from.to_string(), to.to_string());
+        let sftp = sftp.clone();
+        async move {
+            sftp.rename(
+                from.as_str(),
+                to.as_str(),
+                wezterm_ssh::RenameOptions::default(),
+            )
+            .await
+        }
+    };
+
+    if rename(part.as_str(), dest.as_str()).await.is_ok() {
         return Ok(());
     }
-    sftp.remove_file(dest).await.ok();
-    sftp.rename(part, dest, wezterm_ssh::RenameOptions::default())
-        .await
-        .map_err(TransferError::from)
+
+    // Some servers refuse to overwrite an existing target.  Move the old
+    // file aside instead of deleting it: deleting first meant that a second
+    // failure (a transient error, not "already exists") left the user with
+    // neither the new file nor the old one.
+    let backup = format!("{dest}.kaku-old");
+    let had_dest = rename(dest.as_str(), &backup).await.is_ok();
+    match rename(part.as_str(), dest.as_str()).await {
+        Ok(()) => {
+            if had_dest {
+                sftp.remove_file(backup.as_str()).await.ok();
+            }
+            Ok(())
+        }
+        Err(err) => {
+            if had_dest {
+                // Put the original back where it was.
+                rename(&backup, dest.as_str()).await.ok();
+            }
+            Err(TransferError::from(err))
+        }
+    }
 }
 
 /// Move a finished local part file onto `dest` (atomic on one volume).
 fn publish_local(part: &Path, dest: &Path) -> Result<(), TransferError> {
     std::fs::rename(part, dest).map_err(TransferError::from)
+}
+
+/// A single read or write may not park a worker forever.  A half-dead
+/// connection leaves the future pending, cancellation is only checked
+/// between chunks, and the lane, the thread and the progress row would
+/// then stay stuck until the app was restarted.
+const IO_TIMEOUT: Duration = Duration::from_secs(60);
+const IO_STALLED: &str = "connection stalled (no data for 60s)";
+
+/// Run one I/O future under [IO_TIMEOUT], mapping the timeout to `E`.
+async fn with_io_timeout<T, E, F>(fut: F, timed_out: impl FnOnce() -> E) -> Result<T, E>
+where
+    F: std::future::Future<Output = Result<T, E>>,
+{
+    smol::future::or(fut, async {
+        smol::Timer::after(IO_TIMEOUT).await;
+        Err(timed_out())
+    })
+    .await
 }
 
 /// Progress events are throttled so a fast link cannot flood the event
@@ -169,6 +215,9 @@ pub enum TransferEvent {
 #[derive(Debug)]
 pub(crate) enum TransferError {
     Cancelled,
+    /// The destination exists and this transfer was not allowed to
+    /// replace it (a Finder drop onto an existing file).
+    AlreadyExists(String),
     Failed(anyhow::Error),
 }
 
@@ -184,6 +233,12 @@ impl std::fmt::Display for TransferError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Cancelled => write!(f, "cancelled"),
+            Self::AlreadyExists(path) => {
+                write!(
+                    f,
+                    "{path} already exists; drop it somewhere else or rename it"
+                )
+            }
             Self::Failed(err) => write!(f, "{err:#}"),
         }
     }
@@ -212,6 +267,10 @@ enum WorkerJob {
         local: PathBuf,
         remote: Utf8PathBuf,
         resume: bool,
+        /// When false the upload refuses to replace an existing remote
+        /// file.  The Finder drop paths use this so dragging a file over
+        /// one that is already there can never clobber it silently.
+        overwrite: bool,
     },
     /// Copy one remote file to another remote path.
     RemoteCopy { from: Utf8PathBuf, to: Utf8PathBuf },
@@ -266,6 +325,14 @@ const PARALLEL_THRESHOLD: u64 = 16 * 1024 * 1024;
 const PARALLEL_WORKERS: usize = 4;
 
 impl TransferInner {
+    /// Drop the helper pool so the next parallel transfer dials fresh
+    /// connections.  A helper that died mid-slice would otherwise stay in
+    /// the pool and fail every later transfer until the panel restarts.
+    fn invalidate_helpers(&self) {
+        self.helpers.lock().unwrap().clear();
+        self.helpers_unavailable.store(false, Ordering::Relaxed);
+    }
+
     /// Establish (once) and return the auxiliary helper sessions used
     /// for parallel range transfers.  Fewer sessions are returned when
     /// extra connections cannot authenticate non-interactively.
@@ -460,6 +527,7 @@ impl TransferManager {
         local: impl Into<PathBuf>,
         remote: impl Into<Utf8PathBuf>,
         resume: bool,
+        overwrite: bool,
     ) -> TransferId {
         let (local, remote) = (local.into(), remote.into());
         let id = self.register(
@@ -478,6 +546,7 @@ impl TransferManager {
                 local,
                 remote,
                 resume,
+                overwrite,
             },
         );
         id
@@ -620,6 +689,9 @@ impl TransferManager {
                 let state = match result {
                     Ok(()) => TransferState::Done,
                     Err(TransferError::Cancelled) => TransferState::Cancelled,
+                    Err(err @ TransferError::AlreadyExists(_)) => {
+                        TransferState::Failed(err.to_string())
+                    }
                     Err(TransferError::Failed(err)) => TransferState::Failed(format!("{err:#}")),
                 };
                 if let Some(status) = inner.update_status(id, state) {
@@ -660,12 +732,21 @@ async fn run_job(
             local,
             remote,
             resume,
+            overwrite,
         } => {
             let st = std::fs::metadata(&local)?;
             let total = st.len();
             let part = remote_part(&remote);
+            // Refuse to replace a file that is already there unless the
+            // caller asked for it (the F5 and paste paths asked the user
+            // first; the Finder drop paths deliberately did not).
+            if !overwrite && lane.metadata(remote.as_str()).await.is_ok() {
+                return Err(TransferError::AlreadyExists(remote.to_string()));
+            }
             if total >= PARALLEL_THRESHOLD && !resume {
-                return run_upload_parallel(inner, local, remote, total, id, event_tx, cancel);
+                return run_upload_parallel(
+                    inner, lane, local, remote, total, id, event_tx, cancel,
+                );
             }
             let start = if resume {
                 // Resume continues the part file, never the destination:
@@ -717,7 +798,9 @@ async fn run_job(
             let meta = lane.metadata(remote.as_str()).await?;
             let total = meta.size.unwrap_or(0);
             if total >= PARALLEL_THRESHOLD && !resume {
-                return run_download_parallel(inner, remote, local, total, id, event_tx, cancel);
+                return run_download_parallel(
+                    inner, lane, remote, local, total, id, event_tx, cancel,
+                );
             }
             let part = local_part(&local);
             let start = if resume {
@@ -928,8 +1011,12 @@ async fn ensure_remote_parent(
 /// Split-range parallel upload: pre-allocate the remote file, then
 /// every worker (main session + helpers) writes its own byte range
 /// through its own connection.
+// One worker per slice plus the job's identity and its channel:
+// a struct would only move these fields around.
+#[allow(clippy::too_many_arguments)]
 fn run_upload_parallel(
     inner: Arc<TransferInner>,
+    lane: Sftp,
     local: PathBuf,
     remote: Utf8PathBuf,
     total: u64,
@@ -946,7 +1033,7 @@ fn run_upload_parallel(
                 // Same mkdir -p as the single-stream path: a folder upload
                 // can reach a 16MB+ file before any sibling created its
                 // directory.
-                ensure_remote_parent(&inner.created_dirs, &inner.sftp, &remote).await;
+                ensure_remote_parent(&inner.created_dirs, &lane, &remote).await;
                 // Truncate the part file so the slices can seek-write into
                 // it.  The length is not preallocated: every slice writes
                 // its range, so the file reaches `total` on its own.  The
@@ -1042,13 +1129,7 @@ fn run_upload_parallel(
 
             let (main_start, main_len) = slice_range(total, workers, 0);
             let main_res = upload_slice(
-                &inner.sftp,
-                &local,
-                &part,
-                main_start,
-                main_len,
-                &uploaded,
-                &cancel,
+                &lane, &local, &part, main_start, main_len, &uploaded, &cancel,
             );
             done.fetch_add(1, Ordering::Relaxed);
 
@@ -1074,11 +1155,15 @@ fn run_upload_parallel(
             ticker_done.store(true, Ordering::Relaxed);
             match first_err {
                 Some(err) => {
+                    // A slice failure usually means one of the helper
+                    // connections is gone; drop the pool so the next
+                    // transfer does not keep reusing a dead session.
+                    inner.invalidate_helpers();
                     // Slice writes are not a contiguous prefix, so a part
                     // file left behind here would make a later resume
                     // append on top of a hole.  Drop it and let that
                     // resume start over instead.
-                    smol::block_on(async { inner.sftp.remove_file(&part).await.ok() });
+                    smol::block_on(async { lane.remove_file(&part).await.ok() });
                     let failure = if cancel.load(Ordering::Relaxed) {
                         SliceFailure::Cancelled
                     } else {
@@ -1090,7 +1175,7 @@ fn run_upload_parallel(
                     // The mode came in with the OPEN, so one rename is all
                     // that is left to publish the file.
                     let published =
-                        smol::block_on(async { publish_remote(&inner.sftp, &part, &remote).await });
+                        smol::block_on(async { publish_remote(&lane, &part, &remote).await });
                     match published {
                         Ok(()) => {
                             inner.emit_progress(&event_tx, id, total, total);
@@ -1153,14 +1238,16 @@ fn upload_slice(
                 return Err(TransferError::Cancelled);
             }
             let n = remaining.min(buf.len() as u64) as usize;
-            reader
-                .read_exact(&mut buf[..n])
-                .await
-                .map_err(|e| TransferError::Failed(anyhow::anyhow!(e)))?;
-            writer
-                .write_all(&buf[..n])
-                .await
-                .map_err(|e| TransferError::Failed(anyhow::anyhow!(e)))?;
+            with_io_timeout(reader.read_exact(&mut buf[..n]), || {
+                std::io::Error::new(std::io::ErrorKind::TimedOut, IO_STALLED)
+            })
+            .await
+            .map_err(|e| TransferError::Failed(anyhow::anyhow!(e)))?;
+            with_io_timeout(writer.write_all(&buf[..n]), || {
+                std::io::Error::new(std::io::ErrorKind::TimedOut, IO_STALLED)
+            })
+            .await
+            .map_err(|e| TransferError::Failed(anyhow::anyhow!(e)))?;
             uploaded.fetch_add(n as u64, Ordering::Relaxed);
             remaining -= n as u64;
         }
@@ -1176,8 +1263,12 @@ fn upload_slice(
     })
 }
 
+// One worker per slice plus the job's identity and its channel:
+// a struct would only move these fields around.
+#[allow(clippy::too_many_arguments)]
 fn run_download_parallel(
     inner: Arc<TransferInner>,
+    lane: Sftp,
     remote: Utf8PathBuf,
     local: PathBuf,
     total: u64,
@@ -1272,13 +1363,7 @@ fn run_download_parallel(
 
             let (main_start, main_len) = slice_range(total, workers, 0);
             let main_res = download_slice(
-                &inner.sftp,
-                &remote,
-                &part,
-                main_start,
-                main_len,
-                &uploaded,
-                &cancel,
+                &lane, &remote, &part, main_start, main_len, &uploaded, &cancel,
             );
             done.fetch_add(1, Ordering::Relaxed);
 
@@ -1304,6 +1389,10 @@ fn run_download_parallel(
             ticker_done.store(true, Ordering::Relaxed);
             match first_err {
                 Some(err) => {
+                    // A slice failure usually means one of the helper
+                    // connections is gone; drop the pool so the next
+                    // transfer does not keep reusing a dead session.
+                    inner.invalidate_helpers();
                     // The pre-allocated part file is holey, so it can
                     // never be resumed from; drop it rather than let a
                     // later resume trust its length.
@@ -1319,7 +1408,7 @@ fn run_download_parallel(
                     let published = smol::block_on(async {
                         // Preserve the remote execute bits, the way the
                         // single-stream path does.
-                        if let Ok(meta) = inner.sftp.metadata(&remote).await {
+                        if let Ok(meta) = lane.metadata(&remote).await {
                             if let Some(perms) = meta.permissions {
                                 let mode = perms.to_unix_mode() & 0o777;
                                 if mode != 0 {
@@ -1386,14 +1475,16 @@ fn download_slice(
                 return Err(TransferError::Cancelled);
             }
             let n = remaining.min(buf.len() as u64) as usize;
-            reader
-                .read_exact(&mut buf[..n])
-                .await
-                .map_err(|e| TransferError::Failed(anyhow::anyhow!(e)))?;
-            writer
-                .write_all(&buf[..n])
-                .await
-                .map_err(|e| TransferError::Failed(anyhow::anyhow!(e)))?;
+            with_io_timeout(reader.read_exact(&mut buf[..n]), || {
+                std::io::Error::new(std::io::ErrorKind::TimedOut, IO_STALLED)
+            })
+            .await
+            .map_err(|e| TransferError::Failed(anyhow::anyhow!(e)))?;
+            with_io_timeout(writer.write_all(&buf[..n]), || {
+                std::io::Error::new(std::io::ErrorKind::TimedOut, IO_STALLED)
+            })
+            .await
+            .map_err(|e| TransferError::Failed(anyhow::anyhow!(e)))?;
             uploaded.fetch_add(n as u64, Ordering::Relaxed);
             remaining -= n as u64;
         }
@@ -1428,11 +1519,17 @@ where
         if cancel.load(Ordering::Relaxed) {
             return Err(TransferError::Cancelled);
         }
-        let n = reader.read(&mut buf).await?;
+        let n = with_io_timeout(reader.read(&mut buf), || {
+            std::io::Error::new(std::io::ErrorKind::TimedOut, IO_STALLED)
+        })
+        .await?;
         if n == 0 {
             break;
         }
-        writer.write_all(&buf[..n]).await?;
+        with_io_timeout(writer.write_all(&buf[..n]), || {
+            std::io::Error::new(std::io::ErrorKind::TimedOut, IO_STALLED)
+        })
+        .await?;
         done += n as u64;
         if last_emit.elapsed() >= PROGRESS_INTERVAL {
             on_progress(done);
@@ -1444,6 +1541,78 @@ where
 }
 
 /// Human-readable byte count, e.g. `1.4 MB`.
+/// Copy (or move, when `cut`) a local file or tree to a local path.
+///
+/// The SFTP engine has no local-to-local direction: yanking inside the
+/// local panel used to be handed to `copy_remote`, which tried to open
+/// the local paths over ssh and failed.  This is the local twin.
+///
+/// An existing destination file is skipped rather than replaced, so a
+/// paste can never destroy a file the user did not mean to touch; the
+/// returned count of skipped files lets the caller say so.
+pub fn copy_local(from: &str, to: &str, cut: bool) -> Result<(u64, u64), String> {
+    let from_path = std::path::Path::new(from);
+    let to_path = std::path::Path::new(to);
+    let meta = std::fs::symlink_metadata(from_path).map_err(|e| format!("{from}: {e}"))?;
+    let (copied, skipped) = if meta.is_dir() {
+        copy_local_tree(from_path, to_path)?
+    } else {
+        copy_local_file(from_path, to_path)?
+    };
+    if cut {
+        let removed = if meta.is_dir() {
+            std::fs::remove_dir_all(from_path)
+        } else {
+            std::fs::remove_file(from_path)
+        };
+        removed.map_err(|e| format!("{from}: {e}"))?;
+    }
+    Ok((copied, skipped))
+}
+
+fn copy_local_file(from: &std::path::Path, to: &std::path::Path) -> Result<(u64, u64), String> {
+    if to.exists() {
+        return Ok((0, 1));
+    }
+    if let Some(parent) = to.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
+    }
+    std::fs::copy(from, to).map_err(|e| format!("{}: {e}", to.display()))?;
+    Ok((1, 0))
+}
+
+/// Walk `from` and mirror it under `to`, skipping files that are there.
+fn copy_local_tree(from: &std::path::Path, to: &std::path::Path) -> Result<(u64, u64), String> {
+    let mut copied = 0u64;
+    let mut skipped = 0u64;
+    let mut stack = vec![(from.to_path_buf(), to.to_path_buf())];
+    std::fs::create_dir_all(to).map_err(|e| format!("{}: {e}", to.display()))?;
+    while let Some((src_dir, dst_dir)) = stack.pop() {
+        let entries =
+            std::fs::read_dir(&src_dir).map_err(|e| format!("{}: {e}", src_dir.display()))?;
+        for entry in entries {
+            let entry = entry.map_err(|e| e.to_string())?;
+            let src = entry.path();
+            let dst = dst_dir.join(entry.file_name());
+            let file_type = entry.file_type().map_err(|e| e.to_string())?;
+            if file_type.is_dir() {
+                stack.push((src, dst));
+            } else if file_type.is_symlink() {
+                // Copy what the link points at, like `cp -L`.
+                let resolved = std::fs::canonicalize(&src).unwrap_or(src.clone());
+                let (c, s) = copy_local_file(&resolved, &dst)?;
+                copied += c;
+                skipped += s;
+            } else {
+                let (c, s) = copy_local_file(&src, &dst)?;
+                copied += c;
+                skipped += s;
+            }
+        }
+    }
+    Ok((copied, skipped))
+}
+
 /// Create an empty file, or a directory, on this machine.  `create_new`
 /// refuses an existing name instead of truncating it, so a typo cannot
 /// silently empty a file.
@@ -1478,6 +1647,78 @@ pub async fn create_remote(
     }
     let mut file = sftp.create(path).await.map_err(|e| e.to_string())?;
     file.close().await.map_err(|e| e.to_string())
+}
+
+#[cfg(test)]
+mod local_copy_tests {
+    use super::copy_local;
+
+    fn tmpdir() -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "kaku-copy-test-{}-{:?}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// Yank-and-paste inside the local panel has to copy locally, and a
+    /// paste must never replace a file that is already there.
+    #[test]
+    fn local_copy_moves_and_skips_existing_files() {
+        let dir = tmpdir();
+        let src = dir.join("src");
+        std::fs::create_dir_all(src.join("nested")).unwrap();
+        std::fs::write(src.join("a.txt"), b"a").unwrap();
+        std::fs::write(src.join("nested/b.txt"), b"b").unwrap();
+        let dst = dir.join("dst");
+
+        // Directory copy, then a second copy that must skip everything.
+        let (copied, skipped) = copy_local(
+            &src.display().to_string(),
+            &dst.display().to_string(),
+            false,
+        )
+        .unwrap();
+        assert_eq!((copied, skipped), (2, 0));
+        assert_eq!(std::fs::read(dst.join("nested/b.txt")).unwrap(), b"b");
+        let (_, skipped) = copy_local(
+            &src.display().to_string(),
+            &dst.display().to_string(),
+            false,
+        )
+        .unwrap();
+        assert_eq!(skipped, 2);
+        assert!(src.join("a.txt").exists(), "copy removed the source");
+
+        // Cut moves the tree and leaves nothing behind.
+        let moved = dir.join("moved");
+        copy_local(
+            &src.display().to_string(),
+            &moved.display().to_string(),
+            true,
+        )
+        .unwrap();
+        assert!(!src.exists(), "cut left the source behind");
+        assert!(moved.join("nested/b.txt").exists());
+
+        // A single existing destination file is left alone.
+        let single = dir.join("single.txt");
+        std::fs::write(&single, b"keep").unwrap();
+        let (copied, skipped) = copy_local(
+            &single.display().to_string(),
+            &single.display().to_string(),
+            false,
+        )
+        .unwrap();
+        assert_eq!((copied, skipped), (0, 1));
+        assert_eq!(std::fs::read(&single).unwrap(), b"keep");
+        std::fs::remove_dir_all(&dir).ok();
+    }
 }
 
 pub fn format_bytes(bytes: u64) -> String {

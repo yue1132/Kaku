@@ -4,12 +4,30 @@
 use super::types::{sort_entries, FileEntry, PanelSide, SftpPalette};
 use crate::sftp_edit_sync::RemoteStamp;
 use crate::sftp_transfer::TransferManager;
+use mux::pane::PaneId;
 use smol::io::AsyncWriteExt;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::Sender as StdSender;
 use std::sync::{Arc, Mutex};
 use wezterm_ssh::Session;
+
+/// Unregisters the pane when the overlay ends.  The overlay thread used to
+/// leak its registry entry whenever it panicked (the unbind lived after the
+/// event loop), leaving a stale handle for that pane id.
+pub(crate) struct RegistryGuard(PaneId);
+
+impl RegistryGuard {
+    pub(crate) fn new(pane_id: PaneId) -> Self {
+        Self(pane_id)
+    }
+}
+
+impl Drop for RegistryGuard {
+    fn drop(&mut self) {
+        super::registry::unregister(self.0);
+    }
+}
 
 /// A mutable directory view for one half of the dual pane.
 pub(crate) struct Panel {
@@ -69,6 +87,10 @@ impl Panel {
     pub fn set_filter(&mut self, filter: Option<String>) {
         self.filter = filter.filter(|f| !f.is_empty());
         self.apply_filter();
+        // `marked` holds indices into `entries`, and the listing just
+        // changed underneath them.  Keeping them would act on whatever file
+        // now sits at the old index.
+        self.marked.clear();
         self.cursor = 0;
         self.offset = 0;
     }
@@ -266,6 +288,13 @@ pub(crate) enum OpRequest {
         side: PanelSide,
         from: String,
         to: String,
+    },
+    /// Copy (or move) a path inside the local panel.  Local-to-local has
+    /// no remote side, so it cannot ride the transfer engine.
+    LocalCopy {
+        from: String,
+        to: String,
+        cut: bool,
     },
     /// Create a file, or a directory when `is_dir` (yazi's `a`: a
     /// trailing `/` means directory).
@@ -595,29 +624,40 @@ pub(crate) fn spawn_worker(
                         dest_side,
                         cut_source,
                     } => {
-                        let files = match side {
-                            PanelSide::Local => scan_local_tree(&root),
-                            PanelSide::Remote => match session_slot.lock().unwrap().clone() {
-                                Some(session) => {
-                                    let sftp = session.sftp();
-                                    smol::block_on(async {
-                                        let mut out = Vec::new();
-                                        let result =
-                                            scan_remote_tree(&sftp, &root, &mut out, 0).await;
-                                        result.map(|_| out)
-                                    })
-                                }
-                                None => Err("not connected".to_string()),
-                            },
-                        };
-                        let _ = tx.send(OpResult::Scanned {
-                            side,
-                            root,
-                            dest,
-                            dest_side,
-                            cut_source,
-                            files,
-                        });
+                        // Walk on its own thread: the worker is a single
+                        // thread, and a big tree used to block listing,
+                        // rename and create for the whole walk.
+                        let session = session_slot.lock().unwrap().clone();
+                        let tx = tx.clone();
+                        std::thread::Builder::new()
+                            .name("sftp-scan".into())
+                            .spawn(move || {
+                                let files = match side {
+                                    PanelSide::Local => scan_local_tree(&root),
+                                    PanelSide::Remote => match session {
+                                        Some(session) => {
+                                            let sftp = session.sftp();
+                                            smol::block_on(async {
+                                                let mut out = Vec::new();
+                                                let result =
+                                                    scan_remote_tree(&sftp, &root, &mut out, 0)
+                                                        .await;
+                                                result.map(|_| out)
+                                            })
+                                        }
+                                        None => Err("not connected".to_string()),
+                                    },
+                                };
+                                let _ = tx.send(OpResult::Scanned {
+                                    side,
+                                    root,
+                                    dest,
+                                    dest_side,
+                                    cut_source,
+                                    files,
+                                });
+                            })
+                            .ok();
                     }
                     OpRequest::Ls { side, path } => {
                         // An empty remote path resolves to the remote
@@ -676,6 +716,13 @@ pub(crate) fn spawn_worker(
                             },
                         };
                         let _ = tx.send(OpResult::Mutated { side, outcome });
+                    }
+                    OpRequest::LocalCopy { from, to, cut } => {
+                        let outcome = crate::sftp_transfer::copy_local(&from, &to, cut).map(|_| ());
+                        let _ = tx.send(OpResult::Mutated {
+                            side: PanelSide::Local,
+                            outcome,
+                        });
                     }
                     OpRequest::Create { side, path, is_dir } => {
                         let outcome = match side {
@@ -979,6 +1026,34 @@ pub(crate) async fn list_remote(
 
 /// Directory where remote files are downloaded before being opened
 /// with the default macOS application.
+/// Local cache path for a remote file opened with Enter.
+///
+/// It mirrors the remote path under the cache directory (and the host
+/// label on top) instead of using the bare file name: two files called
+/// `report.txt` in different directories, or the same path on two hosts,
+/// used to share one local file, so editing it wrote back to both.
+pub(crate) fn open_cache_path(host: &str, remote_path: &str) -> PathBuf {
+    let mut path = open_cache_dir();
+    let host = host.trim();
+    if !host.is_empty() {
+        path.push(sanitize_component(host));
+    }
+    for part in remote_path.split('/') {
+        let part = part.trim();
+        if !part.is_empty() && part != "." {
+            path.push(sanitize_component(part));
+        }
+    }
+    path
+}
+
+/// Keep one path component usable as a file name on any filesystem.
+fn sanitize_component(part: &str) -> String {
+    part.chars()
+        .map(|c| if c == ':' || c == '\\' { '_' } else { c })
+        .collect()
+}
+
 pub(crate) fn open_cache_dir() -> PathBuf {
     let dir = dirs_next::cache_dir()
         .unwrap_or_else(std::env::temp_dir)
@@ -1091,6 +1166,33 @@ pub(crate) fn parent_path(path: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    /// The listing changed under them, so marks must not survive a filter:
+    /// they are indices, and the file at that index is a different one now.
+    #[test]
+    fn filtering_drops_stale_marks() {
+        let mut panel = Panel::new("/remote".into());
+        panel.set_entries(vec![
+            FileEntry {
+                name: "keep.txt".into(),
+                is_dir: false,
+                is_symlink: false,
+                size: 1,
+                mode: None,
+            },
+            FileEntry {
+                name: "other.bin".into(),
+                is_dir: false,
+                is_symlink: false,
+                size: 2,
+                mode: None,
+            },
+        ]);
+        panel.marked.insert(1);
+        panel.set_filter(Some("keep".into()));
+        assert!(panel.marked.is_empty(), "marks survived a filter");
+        assert_eq!(panel.entries.len(), 1);
+    }
+
     use super::*;
 
     /// macOS denials arrive as a bare `Operation not permitted`; the

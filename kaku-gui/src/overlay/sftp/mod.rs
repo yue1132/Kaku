@@ -76,6 +76,8 @@ pub fn sftp_overlay(
     // session immediately, or start an interactive connect thread.
     let session_slot = std::sync::Arc::new(std::sync::Mutex::new(None));
     registry::register(pane_id);
+    // Held for the life of the overlay so a panic still unregisters it.
+    let _registry_guard = state::RegistryGuard::new(pane_id);
     if let Some(session) = config.session {
         app.session = Some(session.clone());
         *session_slot.lock().unwrap() = Some(session.clone());

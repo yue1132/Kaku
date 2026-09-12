@@ -482,6 +482,10 @@ fn decide_overwrite(key: KeyCode, app: &mut App) -> Result<Handled, bool> {
     if app.pending.is_empty() {
         app.input_mode = None;
         app.overwrite_all = None;
+        // Conflicts and folder confirmations share one queue: answering the
+        // last conflict has to hand over to a folder that is still waiting,
+        // or it stays in `scan_queue` forever without ever asking.
+        start_ready_transfers(app);
     }
     Ok(Handled::Consumed)
 }
@@ -639,7 +643,7 @@ fn open_cursor_file(app: &mut App, ctx: InputContext<'_>) {
             // transfer channel can never break opening; large files
             // simply show "opening ..." until the download lands.
             let source = join_path(&app.panel(side).path, &entry.name);
-            let dest = super::state::open_cache_dir().join(&entry.name);
+            let dest = super::state::open_cache_path(&app.remote_label, &source);
             ctx.req_tx.send(OpRequest::OpenRemote { source, dest }).ok();
             app.set_message(format!("opening {} ...", entry.name));
         }
@@ -679,6 +683,30 @@ fn paste_clipboard(app: &mut App, ctx: InputContext<'_>) {
     };
     let dest_side = app.focus;
     let dest_dir = app.panel(dest_side).path.clone();
+    // Yanking inside the local panel is a plain local copy: there is no
+    // remote side, so the SFTP directions cannot describe it (and handing
+    // local paths to copy_remote used to fail with "no such file").
+    if clipboard.side == PanelSide::Local && dest_side == PanelSide::Local {
+        let mut queued = 0usize;
+        for (path, _is_dir, _size) in &clipboard.items {
+            let Some(name) = path.rsplit('/').find(|part| !part.is_empty()) else {
+                continue;
+            };
+            ctx.req_tx
+                .send(OpRequest::LocalCopy {
+                    from: path.clone(),
+                    to: join_path(&dest_dir, name),
+                    cut: clipboard.cut,
+                })
+                .ok();
+            queued += 1;
+        }
+        app.set_message(format!(
+            "{} {queued} item(s) into {dest_dir}",
+            if clipboard.cut { "moving" } else { "copying" }
+        ));
+        return;
+    }
     let direction = direction_between(clipboard.side, dest_side);
     let mut files = 0usize;
     for (path, is_dir, size) in &clipboard.items {
@@ -850,31 +878,39 @@ pub(crate) fn direction_between(from: PanelSide, to: PanelSide) -> crate::sftp_t
     match (from, to) {
         (PanelSide::Local, PanelSide::Remote) => Direction::Upload,
         (PanelSide::Remote, PanelSide::Local) => Direction::Download,
-        _ => Direction::Copy,
+        // Local-to-local never reaches the engine: `paste_clipboard` routes
+        // it to OpRequest::LocalCopy first.
+        (PanelSide::Local, PanelSide::Local) | (PanelSide::Remote, PanelSide::Remote) => {
+            Direction::Copy
+        }
     }
 }
 
 /// Move confirmed-start transfers out of the pending queue; park the
 /// conflicting ones behind a confirmation prompt.
 pub(crate) fn start_ready_transfers(app: &mut App) {
-    let Some(manager) = app.transfers.clone() else {
-        // Without a connection nothing can start; drop the queue *and* the
-        // answer, so a stale "overwrite all" cannot silently skip the
-        // next prompt.
-        app.pending.clear();
-        app.overwrite_all = None;
-        return;
-    };
-    let mut keep: Vec<PendingTransfer> = Vec::new();
-    for item in std::mem::take(&mut app.pending) {
-        match (item.dest_size.is_some(), app.overwrite_all) {
-            (false, _) => start_and_note(&manager, app, &item, false),
-            (_, Some(true)) => start_and_note(&manager, app, &item, false),
-            (_, Some(false)) => {} // skipped
-            (true, None) => keep.push(item),
+    match app.transfers.clone() {
+        Some(manager) => {
+            let mut keep: Vec<PendingTransfer> = Vec::new();
+            for item in std::mem::take(&mut app.pending) {
+                match (item.dest_size.is_some(), app.overwrite_all) {
+                    (false, _) => start_and_note(&manager, app, &item, false),
+                    (_, Some(true)) => start_and_note(&manager, app, &item, false),
+                    (_, Some(false)) => {} // skipped
+                    (true, None) => keep.push(item),
+                }
+            }
+            app.pending = keep;
+        }
+        None => {
+            // Nothing can start without a connection; drop the queue *and*
+            // the answer, so a stale "overwrite all" cannot silently skip
+            // the next prompt.  The prompt decision below still runs: a
+            // queued folder has to be surfaced (and skippable) instead of
+            // sitting in `scan_queue` forever.
+            app.pending.clear();
         }
     }
-    app.pending = keep;
     if app.pending.is_empty() {
         // The answer has been applied to everything it applied to;
         // leaving it set would silently overwrite later conflicts.
@@ -950,7 +986,7 @@ fn start_transfer(
     let (remote, local) = transfer_paths(item);
     // Upload reads the local side, download reads the remote side.
     match item.direction {
-        crate::sftp_transfer::Direction::Upload => manager.upload(local, remote, resume),
+        crate::sftp_transfer::Direction::Upload => manager.upload(local, remote, resume, true),
         crate::sftp_transfer::Direction::Download => manager.download(remote, local, resume),
         crate::sftp_transfer::Direction::Copy => manager.copy_remote(remote, local),
     }
@@ -1553,6 +1589,42 @@ mod tests {
             assert_eq!(copied.lock().unwrap().last().unwrap(), expected);
             assert!(!app.pending_c);
         }
+    }
+
+    /// Answering the last conflict must hand over to a folder that is
+    /// still waiting for its confirmation, or it sits in `scan_queue`
+    /// forever without ever asking.
+    #[test]
+    fn answering_conflicts_hands_over_to_queued_folders() {
+        let mut app = test_app();
+        conflicting(&mut app, &["only.bin"]);
+        app.scan_queue.push(ScanRequest {
+            side: PanelSide::Remote,
+            root: "/remote/photos".to_string(),
+            dest: "/tmp".to_string(),
+            dest_side: PanelSide::Local,
+            cut_source: false,
+        });
+
+        decide_overwrite(KeyCode::Char('s'), &mut app).unwrap();
+        assert!(app.pending.is_empty());
+        match &app.input_mode {
+            Some(InputMode::ConfirmFolder { name, .. }) => assert_eq!(name, "photos"),
+            other => panic!("folder confirmation was not offered: {:?}", other),
+        }
+    }
+
+    /// Two files with the same name in different remote directories must
+    /// not share one local cache file: editing it wrote back to both.
+    #[test]
+    fn opened_files_get_distinct_cache_paths() {
+        let a = crate::overlay::sftp::state::open_cache_path("user@host", "/home/u/a/report.txt");
+        let b = crate::overlay::sftp::state::open_cache_path("user@host", "/home/u/b/report.txt");
+        let other_host =
+            crate::overlay::sftp::state::open_cache_path("other@host", "/home/u/a/report.txt");
+        assert_ne!(a, b);
+        assert_ne!(a, other_host);
+        assert!(a.ends_with("report.txt"));
     }
 
     /// A half-typed chord does not swallow the next keystroke.

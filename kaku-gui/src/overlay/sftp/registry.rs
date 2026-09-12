@@ -94,7 +94,7 @@ pub(crate) fn upload_dropped(pane_id: PaneId, paths: &[PathBuf]) -> Option<(usiz
                 Ok(files) => {
                     for file in files {
                         let dest = join_path(&dest, &file.rel);
-                        transfers.upload(file.abs, dest, false);
+                        transfers.upload(file.abs, dest, false, false);
                         count += 1;
                     }
                 }
@@ -105,7 +105,7 @@ pub(crate) fn upload_dropped(pane_id: PaneId, paths: &[PathBuf]) -> Option<(usiz
         if !is_regular_file(path) {
             continue;
         }
-        transfers.upload(path.clone(), dest, false);
+        transfers.upload(path.clone(), dest, false, false);
         count += 1;
     }
     if count == 0 {
