@@ -33,6 +33,13 @@ pub(crate) enum FileRequest {
     SetMetadata(SetMetadataFile, Sender<SftpChannelResult<()>>),
     Metadata(FileId, Sender<SftpChannelResult<Metadata>>),
     Fsync(FileId, Sender<SftpChannelResult<()>>),
+    Seek(SeekFile, Sender<SftpChannelResult<()>>),
+}
+
+#[derive(Debug)]
+pub(crate) struct SeekFile {
+    pub file_id: FileId,
+    pub position: u64,
 }
 
 #[derive(Debug)]
@@ -123,6 +130,26 @@ impl File {
             .await?;
         let result = rx.recv().await??;
         Ok(result)
+    }
+
+    /// Moves the read/write position of this handle to `position`.
+    ///
+    /// Used to resume transfers from a byte offset.
+    pub async fn seek(&self, position: u64) -> SftpChannelResult<()> {
+        let (reply, rx) = bounded(1);
+        self.tx
+            .as_ref()
+            .unwrap()
+            .send(SessionRequest::Sftp(SftpRequest::File(FileRequest::Seek(
+                SeekFile {
+                    file_id: self.file_id,
+                    position,
+                },
+                reply,
+            ))))
+            .await?;
+        rx.recv().await??;
+        Ok(())
     }
 
     /// This function causes the remote server to synchronize the file data and metadata to disk

@@ -21,4 +21,7 @@ pub mod soul;
 
 mod ai_auth;
 mod codex_connection;
+pub mod sftp_edit_sync;
+pub mod sftp_sessions;
+pub mod sftp_transfer;
 pub mod thread_util;

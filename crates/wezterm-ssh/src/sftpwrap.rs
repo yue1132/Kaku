@@ -37,14 +37,19 @@ impl SftpWrap {
             #[cfg(feature = "libssh-rs")]
             Self::LibSsh(sftp) => {
                 use crate::sftp::types::WriteMode;
-                use libc::{O_APPEND, O_RDONLY, O_RDWR, O_WRONLY};
+                use libc::{O_APPEND, O_CREAT, O_RDONLY, O_RDWR, O_TRUNC, O_WRONLY};
                 use libssh_rs::OpenFlags;
                 use std::convert::TryInto;
+                // libssh translates the libc O_* bits into SFTP flags:
+                // write modes must carry O_CREAT or opening a file that
+                // does not exist yet fails with SSH_FX_NO_SUCH_FILE.
                 let accesstype = match (opts.write, opts.read) {
-                    (Some(WriteMode::Append), true) => O_RDWR | O_APPEND,
-                    (Some(WriteMode::Append), false) => O_WRONLY | O_APPEND,
-                    (Some(WriteMode::Write), false) => O_WRONLY,
-                    (Some(WriteMode::Write), true) => O_RDWR,
+                    (Some(WriteMode::Append), true) => O_RDWR | O_APPEND | O_CREAT,
+                    (Some(WriteMode::Append), false) => O_WRONLY | O_APPEND | O_CREAT,
+                    (Some(WriteMode::Write), false) => O_WRONLY | O_CREAT | O_TRUNC,
+                    (Some(WriteMode::Write), true) => O_RDWR | O_CREAT | O_TRUNC,
+                    (Some(WriteMode::WriteNoTruncate), false) => O_WRONLY,
+                    (Some(WriteMode::WriteNoTruncate), true) => O_RDWR,
                     (None, true) => O_RDONLY,
                     (None, false) => 0,
                 };

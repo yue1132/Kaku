@@ -54,6 +54,14 @@ fn resolve_file_name(name: Option<&str>) -> anyhow::Result<(PathBuf, File)> {
     );
 }
 
+/// Reserve a free name in the user's download folder, reusing the same
+/// sanitizing and conflict-renaming rules as the paste-in download
+/// channel.  The placeholder is replaced by the caller's atomic rename,
+/// so the name cannot be taken while the transfer runs.
+pub(crate) fn resolve_download_path(name: &str) -> anyhow::Result<PathBuf> {
+    resolve_file_name(Some(name)).map(|(path, _placeholder)| path)
+}
+
 pub fn save_to_downloads(orig_name: Option<String>, data: &[u8]) -> anyhow::Result<()> {
     let (name, mut file) = resolve_file_name(orig_name.as_deref())?;
     file.write_all(data)

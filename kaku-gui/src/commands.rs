@@ -733,7 +733,8 @@ impl CommandDef {
                     EmitEvent(name) if name == "run-kaku-ai-config" => 21,
                     EmitEvent(name) if name == "kaku-launch-lazygit" => 22,
                     EmitEvent(name) if name == "kaku-launch-yazi" => 23,
-                    EmitEvent(name) if name == "kaku-open-remote-files" => 24,
+                    EmitEvent(name) if name == "kaku-sftp" => 24,
+                    EmitEvent(name) if name == "kaku-open-remote-files" => 25,
                     SplitVertical(_) | SplitHorizontal(_) | SplitPane(_) => 30,
                     CloseCurrentTab { .. } | CloseCurrentPane { .. } => 40,
                     RestorePreviousWindow => 42,
@@ -1615,11 +1616,20 @@ pub fn derive_command_from_key_assignment(action: &KeyAssignment) -> Option<Comm
                     menubar: &["Shell"],
                     icon: None,
                 }
+            } else if name == "kaku-sftp" {
+                CommandDef {
+                    brief: "SFTP File Browser".into(),
+                    doc: "Browse and transfer files over the current SSH connection".into(),
+                    keys: vec![(Modifiers::SUPER.union(Modifiers::SHIFT), "r".into())],
+                    args: &[ArgType::ActiveWindow],
+                    menubar: &["Shell"],
+                    icon: None,
+                }
             } else if name == "kaku-open-remote-files" {
                 CommandDef {
-                    brief: "Remote Files".into(),
+                    brief: "Remote Files (sshfs)".into(),
                     doc: "Open the current SSH domain in a local Yazi tab".into(),
-                    keys: vec![(Modifiers::SUPER.union(Modifiers::SHIFT), "r".into())],
+                    keys: vec![],
                     args: &[ArgType::ActiveWindow],
                     menubar: &["Shell"],
                     icon: None,
@@ -2616,6 +2626,7 @@ fn compute_default_actions() -> Vec<KeyAssignment> {
         EmitEvent("run-kaku-ai-config".to_string()),
         EmitEvent("kaku-launch-lazygit".to_string()),
         EmitEvent("kaku-launch-yazi".to_string()),
+        EmitEvent("kaku-sftp".to_string()),
         EmitEvent("kaku-open-remote-files".to_string()),
         SplitVertical(SpawnCommand {
             domain: SpawnTabDomain::CurrentPaneDomain,

@@ -479,22 +479,48 @@ fn ssh_title(host: &str) -> String {
 ///   4. CWD host component (e.g. from `file://host/…`)
 fn ssh_destination_for_pane(pane: &PaneInformation) -> Option<String> {
     if let Some(command) = pane.user_vars.get("WEZTERM_PROG") {
-        if let Some(host) = ssh_target_from_command(command) {
+        if let Some(host) = ssh_target_from_command(command, TargetUser::Strip) {
             return Some(host);
         }
     }
 
     let mux = Mux::try_get()?;
     let real_pane = mux.get_pane(pane.pane_id)?;
-    ssh_destination_for_real_pane(&real_pane)
+    ssh_real_pane_target(&real_pane, TargetUser::Strip)
+}
+
+/// Whether a parsed ssh destination keeps the login the user typed.
+///
+/// Titles and restore keys want the bare host, but a caller that dials the
+/// host itself (the sftp overlay, Finder drops) must keep `user@`: without it
+/// the connection falls back to the local username and silently logs in as a
+/// different account.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TargetUser {
+    Keep,
+    Strip,
 }
 
 /// Same fallback chain as [`ssh_destination_for_pane`], for call sites that
 /// hold a mux pane rather than a `PaneInformation` (e.g. per-pane segments in
 /// split-tab titles).
-fn ssh_destination_for_real_pane(real_pane: &std::sync::Arc<dyn Pane>) -> Option<String> {
+pub(crate) fn ssh_destination_for_real_pane(
+    real_pane: &std::sync::Arc<dyn Pane>,
+) -> Option<String> {
+    ssh_real_pane_target(real_pane, TargetUser::Strip)
+}
+
+/// [`ssh_destination_for_real_pane`] with the typed login kept, for callers
+/// that open their own connection to the destination.
+pub(crate) fn ssh_login_target_for_real_pane(
+    real_pane: &std::sync::Arc<dyn Pane>,
+) -> Option<String> {
+    ssh_real_pane_target(real_pane, TargetUser::Keep)
+}
+
+fn ssh_real_pane_target(real_pane: &std::sync::Arc<dyn Pane>, user: TargetUser) -> Option<String> {
     if let Some(command) = real_pane.copy_user_vars().get("WEZTERM_PROG") {
-        if let Some(host) = ssh_target_from_command(command) {
+        if let Some(host) = ssh_target_from_command(command, user) {
             return Some(host);
         }
     }
@@ -516,7 +542,7 @@ fn ssh_destination_for_real_pane(real_pane: &std::sync::Arc<dyn Pane>) -> Option
     }
 
     if let Some(info) = real_pane.get_foreground_process_info(CachePolicy::AllowStale) {
-        if let Some(host) = ssh_target_from_tokens(&info.argv) {
+        if let Some(host) = ssh_target_from_tokens(&info.argv, user) {
             return Some(host);
         }
     }
@@ -533,7 +559,7 @@ fn is_remote_shell_command(basename: &str) -> bool {
     matches!(basename, "ssh" | "mosh" | "autossh" | "et")
 }
 
-fn ssh_target_from_command(command: &str) -> Option<String> {
+fn ssh_target_from_command(command: &str, user: TargetUser) -> Option<String> {
     let tokens = shlex::split(command).unwrap_or_else(|| {
         command
             .split_whitespace()
@@ -541,10 +567,10 @@ fn ssh_target_from_command(command: &str) -> Option<String> {
             .collect()
     });
 
-    ssh_target_from_tokens(&tokens)
+    ssh_target_from_tokens(&tokens, user)
 }
 
-fn ssh_target_from_tokens(tokens: &[String]) -> Option<String> {
+fn ssh_target_from_tokens(tokens: &[String], user: TargetUser) -> Option<String> {
     if tokens.is_empty() {
         return None;
     }
@@ -567,7 +593,7 @@ fn ssh_target_from_tokens(tokens: &[String]) -> Option<String> {
             expect_value = ssh_option_needs_value(token) || (program == "autossh" && token == "-M");
             continue;
         }
-        return normalize_ssh_target(token);
+        return normalize_ssh_target(token, user);
     }
     None
 }
@@ -747,34 +773,38 @@ fn foreground_process_title_for_pane_info(pane: &PaneInformation) -> Option<Stri
     foreground_process_title(&*real_pane)
 }
 
-fn normalize_ssh_target(target: &str) -> Option<String> {
-    let mut host = target.trim();
+fn normalize_ssh_target(target: &str, user: TargetUser) -> Option<String> {
+    let target = target.trim();
+    if target.is_empty() {
+        return None;
+    }
+
+    let (login, rest) = match target.rsplit_once('@') {
+        Some((login, rest)) => (Some(login), rest),
+        None => (None, target),
+    };
+
+    let host = if let Some(without_open) = rest.strip_prefix('[') {
+        match without_open.find(']') {
+            Some(end) => &without_open[..end],
+            None => rest,
+        }
+    } else if rest.matches(':').count() == 1 {
+        match rest.rsplit_once(':') {
+            Some((h, port)) if !h.is_empty() && port.chars().all(|c| c.is_ascii_digit()) => h,
+            _ => rest,
+        }
+    } else {
+        rest
+    };
+
     if host.is_empty() {
         return None;
     }
 
-    if let Some(rest) = host.rsplit_once('@').map(|(_, rhs)| rhs) {
-        host = rest;
-    }
-
-    if let Some(without_open) = host.strip_prefix('[') {
-        if let Some(end) = without_open.find(']') {
-            return Some(without_open[..end].to_string());
-        }
-    }
-
-    if host.matches(':').count() == 1 {
-        if let Some((h, port)) = host.rsplit_once(':') {
-            if !h.is_empty() && port.chars().all(|c| c.is_ascii_digit()) {
-                host = h;
-            }
-        }
-    }
-
-    if host.is_empty() {
-        None
-    } else {
-        Some(host.to_string())
+    match (user, login) {
+        (TargetUser::Keep, Some(login)) if !login.is_empty() => Some(format!("{login}@{host}")),
+        _ => Some(host.to_string()),
     }
 }
 
@@ -1492,7 +1522,7 @@ mod test {
     #[test]
     fn parse_plain_ssh_target() {
         assert_eq!(
-            ssh_target_from_command("ssh root@10.0.0.8").as_deref(),
+            ssh_target_from_command("ssh root@10.0.0.8", TargetUser::Strip).as_deref(),
             Some("10.0.0.8")
         );
     }
@@ -1500,34 +1530,56 @@ mod test {
     #[test]
     fn parse_ssh_target_with_options() {
         assert_eq!(
-            ssh_target_from_command("ssh -p 2222 -i ~/.ssh/id user@build-host").as_deref(),
+            ssh_target_from_command(
+                "ssh -p 2222 -i ~/.ssh/id user@build-host",
+                TargetUser::Strip
+            )
+            .as_deref(),
+            Some("build-host")
+        );
+    }
+
+    #[test]
+    fn parse_ssh_target_keeps_login_when_asked() {
+        assert_eq!(
+            ssh_target_from_command("ssh root@10.0.0.8", TargetUser::Keep).as_deref(),
+            Some("root@10.0.0.8")
+        );
+        assert_eq!(
+            ssh_target_from_command("ssh -p 2222 user@build-host", TargetUser::Keep).as_deref(),
+            Some("user@build-host")
+        );
+        // No typed login stays host-only, and a port is still dropped.
+        assert_eq!(
+            ssh_target_from_command("ssh build-host:2222", TargetUser::Keep).as_deref(),
             Some("build-host")
         );
     }
 
     #[test]
     fn ignore_non_ssh_command() {
-        assert!(ssh_target_from_command("ls -la").is_none());
-        assert!(ssh_target_from_command("ssh-keygen -t ed25519").is_none());
+        assert!(ssh_target_from_command("ls -la", TargetUser::Strip).is_none());
+        assert!(ssh_target_from_command("ssh-keygen -t ed25519", TargetUser::Strip).is_none());
     }
 
     #[test]
     fn parse_other_remote_shell_targets() {
         assert_eq!(
-            ssh_target_from_command("mosh alice@edge.example").as_deref(),
+            ssh_target_from_command("mosh alice@edge.example", TargetUser::Strip).as_deref(),
             Some("edge.example")
         );
         assert_eq!(
-            ssh_target_from_command("mosh --ssh=ssh -p 60001 edge").as_deref(),
+            ssh_target_from_command("mosh --ssh=ssh -p 60001 edge", TargetUser::Strip).as_deref(),
             Some("edge")
         );
         assert_eq!(
-            ssh_target_from_command("autossh -M 20000 build@ci-box").as_deref(),
+            ssh_target_from_command("autossh -M 20000 build@ci-box", TargetUser::Strip).as_deref(),
             Some("ci-box")
         );
-        assert_eq!(ssh_target_from_command("et devbox:8080").as_deref(), {
-            Some("devbox")
-        });
+        assert_eq!(
+            ssh_target_from_command("et devbox:8080", TargetUser::Strip).as_deref(),
+            { Some("devbox") }
+        );
     }
 
     #[test]

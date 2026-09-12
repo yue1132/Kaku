@@ -89,6 +89,7 @@ mod prevcursor;
 pub mod render;
 pub mod resize;
 mod selection;
+pub mod sftp;
 pub mod spawn;
 pub mod tab_rename;
 pub mod webgpu;
@@ -1135,6 +1136,10 @@ pub struct TermWindow {
     /// running overlay synchronized with config-driven palette changes.
     ai_chat_overlay_panes:
         HashMap<PaneId, std::sync::mpsc::Sender<crate::overlay::ai_chat::ChatPalette>>,
+
+    /// Panes that currently have an SFTP overlay open; tracked so the
+    /// toggle key can close the overlay again.
+    sftp_overlay_panes: std::collections::HashSet<PaneId>,
 }
 
 /// Set once WebGpu has failed to initialize in this process. Every later
@@ -1791,6 +1796,7 @@ impl TermWindow {
             selection_copy_disabled_hint_shown: false,
             last_window_title: String::new(),
             ai_chat_overlay_panes: HashMap::new(),
+            sftp_overlay_panes: std::collections::HashSet::new(),
             live_resizing: false,
             pending_screen_change_resize: false,
             pending_pty_flush_after_resize: false,
@@ -2145,6 +2151,26 @@ impl TermWindow {
                     Some(pane) => pane,
                     None => return Ok(true),
                 };
+                // A drop on the file browser uploads to the directory its
+                // remote panel is showing.
+                if let Some(host) = self.overlay_host_for_pane(&pane) {
+                    if let Some((count, dest)) =
+                        crate::overlay::sftp::registry::upload_dropped(host, &paths)
+                    {
+                        self.show_toast(format!(
+                            "Uploading {count} file{} to {dest}",
+                            if count == 1 { "" } else { "s" }
+                        ));
+                        return Ok(true);
+                    }
+                }
+                // No browser open: a live ssh session on this pane takes
+                // the drop itself, so dragging from Finder uploads
+                // straight to the remote directory the shell is in.
+                if let Some(label) = crate::sftp_drop::upload_to_pane(&pane, &paths) {
+                    self.show_toast(format!("Uploading to {label} ..."));
+                    return Ok(true);
+                }
                 let paths = paths
                     .iter()
                     .map(|path| {
@@ -4839,6 +4865,8 @@ impl TermWindow {
                     return Ok(PerformAssignmentResult::Handled);
                 } else if name == "kaku-ai-chat" {
                     ai_chat::toggle_overlay(self, pane);
+                } else if name == "kaku-sftp" {
+                    sftp::toggle_overlay(self, pane);
                 } else if name == "update-kaku" || name == "run-kaku-update" {
                     crate::frontend::check_for_updates_from_menu();
                 } else if name == "restart-to-update" {
@@ -6213,6 +6241,18 @@ impl TermWindow {
 
     /// an active overlay (such as search or copy mode) then that will
     /// be returned.
+    /// The pane hosting the overlay that `pane` displays, when `pane` is
+    /// itself an overlay pane.
+    pub(crate) fn overlay_host_for_pane(&self, pane: &Arc<dyn Pane>) -> Option<PaneId> {
+        self.sftp_overlay_panes.iter().copied().find(|pid| {
+            self.pane_state(*pid)
+                .overlay
+                .as_ref()
+                .map(|overlay| overlay.pane.pane_id() == pane.pane_id())
+                .unwrap_or(false)
+        })
+    }
+
     pub fn get_active_pane_or_overlay(&self) -> Option<Arc<dyn Pane>> {
         let mux = Mux::get();
         let tab = match mux.get_active_tab_for_window(self.mux_window_id) {
@@ -6412,6 +6452,7 @@ impl TermWindow {
             }
         }
         let was_chat = self.ai_chat_overlay_panes.remove(&pane_id).is_some();
+        self.sftp_overlay_panes.remove(&pane_id);
         if let Some(window) = self.window.as_ref() {
             window.invalidate();
         }

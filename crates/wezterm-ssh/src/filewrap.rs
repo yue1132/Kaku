@@ -10,6 +10,24 @@ pub(crate) enum FileWrap {
 }
 
 impl FileWrap {
+    /// Moves the read/write position to `pos`, used to resume transfers.
+    pub fn seek(&mut self, pos: u64) -> SftpChannelResult<()> {
+        use std::io::Seek;
+        match self {
+            #[cfg(feature = "ssh2")]
+            Self::Ssh2(file) => file
+                .seek(std::io::SeekFrom::Start(pos))
+                .map(|_| ())
+                .map_err(SftpChannelError::from),
+
+            #[cfg(feature = "libssh-rs")]
+            Self::LibSsh(file) => file
+                .seek(std::io::SeekFrom::Start(pos))
+                .map(|_| ())
+                .map_err(SftpChannelError::from),
+        }
+    }
+
     pub fn reader(&mut self) -> Box<dyn std::io::Read + '_> {
         match self {
             #[cfg(feature = "ssh2")]

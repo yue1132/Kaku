@@ -171,6 +171,53 @@ fn format_host_verification_for_terminal(failed: HostVerificationFailed) -> Vec<
     ]
 }
 
+/// Resolve the live ssh session (and a short host label) behind a pane
+/// when the pane belongs to an `SSH:`/`SSHMUX:` domain that has already
+/// connected.  Returns None for local panes and ssh-CLI panes.
+pub fn ssh_session_for_pane(pane: &Arc<dyn Pane>) -> Option<(Session, String)> {
+    let mux = Mux::try_get()?;
+    let domain = mux.get_domain(pane.domain_id())?;
+    let ssh_domain = domain.downcast_ref::<RemoteSshDomain>()?;
+    let session = ssh_domain.session()?;
+    let name = domain.domain_name();
+    let label = name
+        .strip_prefix("SSH:")
+        .or_else(|| name.strip_prefix("SSHMUX:"))
+        .unwrap_or(&name)
+        .to_string();
+    Some((session, label))
+}
+
+/// Find a live Kaku-managed session for `[user@]host` across all SSH
+/// domains, regardless of which pane originated it.  Lets features ride
+/// an already authenticated connection instead of re-running the ssh
+/// handshake.
+pub fn live_session_for_target(target: &str) -> Option<(Session, String)> {
+    let (user, host) = match target.split_once('@') {
+        Some((u, h)) => (Some(u), h),
+        None => (None, target),
+    };
+    let mux = Mux::try_get()?;
+    for domain in mux.iter_domains() {
+        let Some(ssh_domain) = domain.downcast_ref::<RemoteSshDomain>() else {
+            continue;
+        };
+        if !ssh_domain.matches_target(user, host) {
+            continue;
+        }
+        if let Some(session) = ssh_domain.session() {
+            let name = domain.domain_name();
+            let label = name
+                .strip_prefix("SSH:")
+                .or_else(|| name.strip_prefix("SSHMUX:"))
+                .unwrap_or(&name)
+                .to_string();
+            return Some((session, label));
+        }
+    }
+    None
+}
+
 /// Represents a connection to remote host via ssh.
 /// The domain is created with the ssh config prior to making the
 /// connection.  The connection is established by the first spawn()
@@ -244,6 +291,33 @@ impl RemoteSshDomain {
 
     pub fn ssh_config(&self) -> anyhow::Result<ConfigMap> {
         ssh_domain_to_ssh_config(&self.dom)
+    }
+
+    /// Returns a clone of the live, authenticated ssh session, if this
+    /// domain has an established connection.  The handle can be used to
+    /// open an sftp channel on the existing connection without re-auth.
+    pub fn session(&self) -> Option<Session> {
+        self.session.lock().unwrap().clone()
+    }
+
+    /// True when this domain dials `[user@]host`: the remote address's
+    /// host part compares case-insensitively (port ignored), and a
+    /// typed user must match the domain's configured user when both
+    /// are set.
+    pub fn matches_target(&self, user: Option<&str>, host: &str) -> bool {
+        let addr_host = self
+            .dom
+            .remote_address
+            .split(':')
+            .next()
+            .unwrap_or_default();
+        if !addr_host.eq_ignore_ascii_case(host) {
+            return false;
+        }
+        match (user, self.dom.username.as_deref()) {
+            (Some(u), Some(du)) => u == du,
+            _ => true,
+        }
     }
 
     fn build_command(

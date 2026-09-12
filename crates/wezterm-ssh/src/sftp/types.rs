@@ -223,6 +223,11 @@ pub enum WriteMode {
 
     /// Overwrite an existing file when opening to write it
     Write,
+
+    /// Open an existing file for writing without truncating it; the
+    /// read/write position starts at the beginning and can be moved
+    /// with seek.  Used for parallel range transfers.
+    WriteNoTruncate,
 }
 
 /// Represents options to provide when renaming a file or directory
@@ -296,7 +301,8 @@ mod ssh2_impl {
             }
 
             match opts.write {
-                Some(WriteMode::Write) => flags |= Self::WRITE | Self::TRUNCATE,
+                Some(WriteMode::Write) => flags |= Self::WRITE | Self::CREATE | Self::TRUNCATE,
+                Some(WriteMode::WriteNoTruncate) => flags |= Self::WRITE,
                 Some(WriteMode::Append) => flags |= Self::WRITE | Self::APPEND | Self::CREATE,
                 None => {}
             }

@@ -1,6 +1,6 @@
 use super::{SessionRequest, SessionSender};
-use crate::sftp::dir::{Dir, DirRequest};
-use crate::sftp::file::{File, FileRequest};
+use crate::sftp::dir::DirRequest;
+use crate::sftp::file::FileRequest;
 use crate::sftp::types::{Metadata, OpenFileType, OpenOptions, RenameOptions, WriteMode};
 use camino::Utf8PathBuf;
 use error::SftpError;
@@ -13,6 +13,11 @@ pub(crate) mod dir;
 pub(crate) mod error;
 pub(crate) mod file;
 pub(crate) mod types;
+
+// Re-export the handles so downstream crates can name them; the
+// modules themselves stay crate-private.
+pub use crate::sftp::dir::Dir;
+pub use crate::sftp::file::File;
 
 fn into_invalid_data<E>(err: E) -> io::Error
 where

@@ -75,12 +75,18 @@ pub(crate) struct Exec {
 
 #[derive(Clone)]
 pub struct Session {
-    tx: SessionSender,
+    tx: std::sync::Arc<SessionSender>,
 }
 
 impl Drop for Session {
     fn drop(&mut self) {
-        self.tx.try_send(SessionRequest::SessionDropped).ok();
+        // Clones share one handle; only notify the session thread when
+        // the LAST reference is dropped, otherwise unrelated clones
+        // (a cached handle, a worker's copy) terminate the session for
+        // every remaining user.
+        if std::sync::Arc::strong_count(&self.tx) == 1 {
+            self.tx.try_send(SessionRequest::SessionDropped).ok();
+        }
         log::trace!("Drop Session");
     }
 }
@@ -125,7 +131,12 @@ impl Session {
             keep_alive,
         };
         std::thread::spawn(move || inner.run());
-        Ok((Self { tx: session_sender }, rx_event))
+        Ok((
+            Self {
+                tx: std::sync::Arc::new(session_sender),
+            },
+            rx_event,
+        ))
     }
 
     pub async fn request_pty(
@@ -149,8 +160,8 @@ impl Session {
             .await
             .map_err(|_| DeadSession)?;
         let (mut ssh_pty, mut child) = rx.recv().await??;
-        ssh_pty.tx.replace(self.tx.clone());
-        child.tx.replace(self.tx.clone());
+        ssh_pty.tx.replace(SessionSender::clone(&self.tx));
+        child.tx.replace(SessionSender::clone(&self.tx));
         Ok((ssh_pty, child))
     }
 
@@ -171,7 +182,7 @@ impl Session {
             .await
             .map_err(|_| DeadSession)?;
         let mut exec = rx.recv().await??;
-        exec.child.tx.replace(self.tx.clone());
+        exec.child.tx.replace(SessionSender::clone(&self.tx));
         Ok(exec)
     }
 
@@ -184,7 +195,7 @@ impl Session {
     /// first sftp operation, the sftp subsystem will be initialized.
     pub fn sftp(&self) -> Sftp {
         Sftp {
-            tx: self.tx.clone(),
+            tx: SessionSender::clone(&self.tx),
         }
     }
 }

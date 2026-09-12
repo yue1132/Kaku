@@ -14,6 +14,7 @@ pub mod launcher;
 pub mod prompt;
 pub mod quickselect;
 pub mod selector;
+pub mod sftp;
 
 #[cfg(not(target_os = "macos"))]
 pub use confirm_close_pane::confirm_close_window;

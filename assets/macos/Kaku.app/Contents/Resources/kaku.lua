@@ -4539,11 +4539,11 @@ config.keys = (function() return {
     action = wezterm.action.EmitEvent('kaku-launch-yazi'),
   },
 
-  -- Cmd+Shift+R: open the current SSH domain in a local yazi tab via sshfs
+  -- Cmd+Shift+R: native SFTP dual-pane browser over the pane's SSH session
   {
     key = 'R',
     mods = 'CMD|SHIFT',
-    action = wezterm.action.EmitEvent('kaku-open-remote-files'),
+    action = wezterm.action.EmitEvent('kaku-sftp'),
   },
 
   -- Window Controls
