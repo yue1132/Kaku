@@ -1397,6 +1397,18 @@ if ! (( \${+functions[_zsh_highlight]} )) && [[ -f "\$KAKU_ZSH_DIR/plugins/fast-
     precmd_functions+=(fast_syntax_highlighting_defer)
 fi
 
+# Recover the shell after a TUI or SSH session exits without restoring input
+# modes (#551). Run at the next prompt, never on wake while a TUI is still alive.
+_kaku_reset_mouse_tracking() {
+    if [[ "\${TERM_PROGRAM:-}" == "Kaku" || ( -n "\${TMUX:-}" && -n "\${KAKU_SESSION:-}" ) ]]; then
+        printf '\033[?1000;1002;1003;1004;1005;1006;1007;1016l'
+    fi
+    return 0
+}
+if [[ \${precmd_functions[(Ie)_kaku_reset_mouse_tracking]} -eq 0 ]]; then
+    precmd_functions+=(_kaku_reset_mouse_tracking)
+fi
+
 # Kaku AI fix hooks (error-only):
 # - preexec captures the command text
 # - precmd captures the previous command exit code

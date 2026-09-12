@@ -209,6 +209,19 @@ where
     .detach();
 }
 
+fn kaku_config_command(kaku_bin: String, config_file: Option<&Path>) -> Vec<String> {
+    let mut args = vec![kaku_bin];
+    if let Some(path) = config_file {
+        // Settings must edit the file that this GUI loads, even when its new
+        // window starts in a different working directory.
+        let path = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+        args.push("--config-file".to_string());
+        args.push(path.to_string_lossy().into_owned());
+    }
+    args.push("config".to_string());
+    args
+}
+
 pub fn open_kaku_config() {
     let kaku_bin = kaku_cli_program_for_spawn();
     ensure_singleton_window("kaku-config", async move || {
@@ -219,7 +232,10 @@ pub fn open_kaku_config() {
         crate::spawn::spawn_command_internal(
             SpawnCommand {
                 domain: SpawnTabDomain::DomainName("local".to_string()),
-                args: Some(vec![kaku_bin, "config".to_string()]),
+                args: Some(kaku_config_command(
+                    kaku_bin,
+                    config::config_file_override().as_deref(),
+                )),
                 ..Default::default()
             },
             // Keep settings isolated from active coding tabs so ESC inside
@@ -1400,7 +1416,33 @@ pub fn try_new() -> Result<Rc<GuiFrontEnd>, Error> {
 
 #[cfg(test)]
 mod tests {
-    use super::shell_quote_program;
+    use super::{kaku_config_command, shell_quote_program};
+    use std::path::Path;
+
+    #[test]
+    fn settings_command_preserves_custom_config_path() {
+        assert_eq!(
+            kaku_config_command("kaku".into(), Some(Path::new("/tmp/custom config.lua"))),
+            vec!["kaku", "--config-file", "/tmp/custom config.lua", "config"]
+        );
+    }
+
+    #[test]
+    fn settings_command_keeps_default_config_resolution() {
+        assert_eq!(
+            kaku_config_command("kaku".into(), None),
+            vec!["kaku", "config"]
+        );
+    }
+
+    #[test]
+    fn settings_command_resolves_relative_config_before_spawn() {
+        let relative = Path::new("Cargo.toml");
+        let args = kaku_config_command("kaku".into(), Some(relative));
+        let expected = std::fs::canonicalize(relative).expect("existing fixture");
+        assert_eq!(Path::new(&args[2]), expected);
+        assert!(Path::new(&args[2]).is_absolute());
+    }
 
     #[test]
     fn shell_program_with_spaces_round_trips_as_one_token() {

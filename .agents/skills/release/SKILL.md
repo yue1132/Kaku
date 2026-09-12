@@ -85,6 +85,10 @@ These are the areas that produce the most post-release bug reports and that CI c
 5. **Render timing / stale drawable** (#452, #458): on the bundled WebGpu backend, sleep the Mac then wake it and confirm the window repaints instead of freezing on the old frame while keystrokes still reach the shell; connect or disconnect an external display and confirm no frozen frame or geometry jump; open a new window straight into fullscreen and resize it, confirming it fills without a stale first frame.
 6. **Hyperlinks** (#547): Cmd-hover a URL that the terminal soft-wraps and confirm both rows target the full URL. Then print a URL exactly as wide as the terminal, followed by `\r\n` and unindented unrelated text; the target must exclude that text. Terminal and surface tests cover the grouping; check the built app hover target too.
 
+7. **Mouse recovery** (#551): in both zsh and fish, run `printf '\033[?1003;1006h'` and return to the prompt; moving the mouse must not insert escape sequences. Also keep a mouse-enabled TUI running and confirm mouse input still works until it exits.
+
+8. **Settings lifecycle and custom configs** (#545): start the app with a minimal standalone `--config-file`, switch between Kaku Light and Kaku Dark, and confirm Settings edits that file and the main window follows. Save and exit Settings repeatedly; no destroyed-window repaint panic should appear.
+
 When a release fixes a bug outside this list, add the reproduction here so the next release re-checks it.
 
 ## Verification commands

@@ -49,6 +49,22 @@ grep -Fq 'set -l capability_file "$HOME/.config/kaku/ai_inline_capability"' \
 
 if command -v fish >/dev/null 2>&1; then
   fish_bin="$(command -v fish)"
+  mouse_reset="$(env HOME="$HOME" TERM_PROGRAM=Kaku "$fish_bin" --no-config -c '
+    source "$HOME/.config/kaku/fish/kaku.fish" >/dev/null
+    __kaku_semantic_precmd
+  ')"
+  [[ "$mouse_reset" == $'\e[?1000;1002;1003;1004;1005;1006;1007;1016l\e]133;A\a' ]] \
+    || fail "prompt did not reset stale mouse/focus reporting before its marker"
+
+  outside_reset="$(env HOME="$HOME" TERM_PROGRAM=Apple_Terminal "$fish_bin" --no-config -c '
+    source "$HOME/.config/kaku/fish/kaku.fish" >/dev/null
+    set -gx TMUX ""
+    set -gx KAKU_SESSION 1
+    __kaku_semantic_precmd
+  ')"
+  [[ "$outside_reset" == $'\e]133;A\a' ]] \
+    || fail "mouse hook changed a different terminal"
+
   starship_stub_dir="$tmp_dir/starship-bin"
   starship_marker="$tmp_dir/starship-initialized"
   mkdir -p "$starship_stub_dir"

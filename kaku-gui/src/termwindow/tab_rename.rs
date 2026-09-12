@@ -524,10 +524,9 @@ impl TabRenameModal {
 
         let tab_bar_colors = term_window
             .config
-            .colors
-            .as_ref()
-            .and_then(|c| c.tab_bar.as_ref())
-            .cloned()
+            .resolved_palette
+            .tab_bar
+            .clone()
             .unwrap_or_else(TabBarColors::default);
 
         if self.is_active_in_window(term_window) {
@@ -544,10 +543,9 @@ impl TabRenameModal {
     ) -> (ElementColors, Option<Corners>) {
         let tab_bar_colors = term_window
             .config
-            .colors
-            .as_ref()
-            .and_then(|c| c.tab_bar.as_ref())
-            .cloned()
+            .resolved_palette
+            .tab_bar
+            .clone()
             .unwrap_or_else(TabBarColors::default);
         let active = self.is_active_in_window(term_window);
         let (title_bg, title_fg) = self.resolved_tab_title_colors(term_window, palette);

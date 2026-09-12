@@ -772,12 +772,12 @@ impl AiClient {
         let mut refreshed_chatgpt = false;
         let mut attempt = 0;
         while attempt < max_attempts {
-            if attempt > 0 {
-                std::thread::sleep(std::time::Duration::from_secs(1 << attempt));
-                if cancelled.load(Ordering::Relaxed) {
-                    anyhow::bail!("cancelled during retry backoff");
-                }
-            }
+            let backoff = if attempt == 0 {
+                std::time::Duration::ZERO
+            } else {
+                std::time::Duration::from_secs(1 << attempt)
+            };
+            wait_before_request(cancelled, backoff)?;
             let response = match build(credential).send() {
                 Ok(response) => response,
                 Err(error) => {
@@ -2206,6 +2206,23 @@ fn upsert_synthesized_response_message(
     Ok(())
 }
 
+/// Waits between HTTP attempts without holding up cancellation.
+fn wait_before_request(cancelled: &AtomicBool, backoff: std::time::Duration) -> Result<()> {
+    let deadline = std::time::Instant::now() + backoff;
+    loop {
+        // Check even for the first attempt and after the final sleep, so a
+        // cancellation at the backoff boundary cannot start another request.
+        if cancelled.load(Ordering::Relaxed) {
+            anyhow::bail!("cancelled before HTTP request");
+        }
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        if remaining.is_zero() {
+            return Ok(());
+        }
+        std::thread::sleep(remaining.min(std::time::Duration::from_millis(50)));
+    }
+}
+
 /// Send a request up to `max_attempts` times with exponential backoff on transient
 /// failures (network errors, HTTP 429, HTTP 5xx). Non-retryable HTTP errors
 /// (4xx other than 429) bail immediately so misconfiguration surfaces fast.
@@ -2221,13 +2238,12 @@ fn send_with_retry(
     let mut last_err = String::new();
     let max_attempts = max_attempts.max(1);
     for attempt in 0..max_attempts {
-        if attempt > 0 {
-            let backoff = std::time::Duration::from_secs(1 << attempt);
-            std::thread::sleep(backoff);
-            if cancelled.load(Ordering::Relaxed) {
-                anyhow::bail!("cancelled during retry backoff");
-            }
-        }
+        let backoff = if attempt == 0 {
+            std::time::Duration::ZERO
+        } else {
+            std::time::Duration::from_secs(1 << attempt)
+        };
+        wait_before_request(cancelled, backoff)?;
         let r = match req.try_clone().context("clone request")?.send() {
             Ok(r) => r,
             Err(e) => {
@@ -2610,6 +2626,105 @@ mod tests {
     use std::net::TcpListener;
     use std::sync::atomic::AtomicBool;
     use std::sync::mpsc;
+
+    #[test]
+    fn retry_wait_checks_cancellation_before_first_attempt() {
+        let cancelled = AtomicBool::new(true);
+        assert!(super::wait_before_request(&cancelled, std::time::Duration::ZERO).is_err());
+        assert!(
+            super::wait_before_request(&AtomicBool::new(false), std::time::Duration::ZERO).is_ok()
+        );
+    }
+
+    #[test]
+    fn retry_wait_checks_cancellation_after_final_sleep() {
+        let cancelled = AtomicBool::new(false);
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                std::thread::sleep(std::time::Duration::from_millis(5));
+                cancelled.store(true, std::sync::atomic::Ordering::Relaxed);
+            });
+            assert!(
+                super::wait_before_request(&cancelled, std::time::Duration::from_millis(20))
+                    .is_err()
+            );
+        });
+    }
+
+    #[test]
+    fn retry_wait_interrupts_long_backoff() {
+        let cancelled = AtomicBool::new(false);
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+                cancelled.store(true, std::sync::atomic::Ordering::Relaxed);
+            });
+            let start = std::time::Instant::now();
+            assert!(
+                super::wait_before_request(&cancelled, std::time::Duration::from_secs(2)).is_err()
+            );
+            assert!(start.elapsed() < std::time::Duration::from_secs(1));
+        });
+    }
+
+    #[test]
+    fn retry_transports_do_not_send_cancelled_first_request() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind cancellation probe");
+        listener.set_nonblocking(true).unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let http = reqwest::blocking::Client::builder()
+            .no_proxy()
+            .timeout(std::time::Duration::from_millis(100))
+            .build()
+            .unwrap();
+        let cancelled = AtomicBool::new(true);
+        let error = super::send_with_retry(http.get(&endpoint), "test", &cancelled, 1)
+            .expect_err("cancelled generic request");
+        assert!(error.to_string().contains("cancelled"));
+        assert_eq!(
+            listener.accept().unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock
+        );
+
+        let config = AssistantConfig {
+            api_key: String::new(),
+            chat_model: "test".to_string(),
+            chat_model_choices: Vec::new(),
+            base_url: endpoint.clone(),
+            custom_headers: Vec::new(),
+            provider: "Codex".to_string(),
+            api_mode: ApiMode::Responses,
+            auth_type: "codex".to_string(),
+            chat_tools_enabled: true,
+            native_web_search: false,
+            web_search_provider: None,
+            web_search_api_key: None,
+            web_fetch_script: None,
+            fast_model: None,
+            memory_curator_model: None,
+        };
+        let client = AiClient::new_with_timeout(config, std::time::Duration::from_millis(100));
+        let builds = std::cell::Cell::new(0);
+        let error = client
+            .send_codex_request_with_retry(
+                &mut CodexCredential::None,
+                &http,
+                |_| {
+                    builds.set(builds.get() + 1);
+                    http.get(&endpoint)
+                },
+                "test",
+                &cancelled,
+                1,
+            )
+            .expect_err("cancelled Codex request");
+        assert!(error.to_string().contains("cancelled"));
+        assert_eq!(builds.get(), 0);
+        assert_eq!(
+            listener.accept().unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock
+        );
+    }
 
     fn collect_segments(segs: Vec<ThinkSegment>) -> (String, String) {
         let mut tokens = String::new();

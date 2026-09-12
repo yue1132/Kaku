@@ -823,6 +823,10 @@ function __kaku_semantic_preexec --on-event fish_preexec
     printf '\033]133;C;\007'
 end
 function __kaku_semantic_precmd --on-event fish_prompt
+    # Recover input modes abandoned by a crashed TUI or disconnected SSH (#551).
+    if test "$TERM_PROGRAM" = Kaku; or begin; test -n "$TMUX"; and test -n "$KAKU_SESSION"; end
+        printf '\033[?1000;1002;1003;1004;1005;1006;1007;1016l'
+    end
     printf '\033]133;A\007'
 end
 

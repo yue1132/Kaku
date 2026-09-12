@@ -869,6 +869,77 @@ fn config_dirs() -> Vec<PathBuf> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn builtin_kaku_scheme_mirrors_match_complete_bundled_palettes() {
+        let source = include_str!("../../assets/macos/Kaku.app/Contents/Resources/kaku.lua");
+        let constants = source
+            .split_once("local KAKU = {")
+            .expect("Kaku constants")
+            .1
+            .split_once("\n}")
+            .expect("end of Kaku constants")
+            .0;
+        let schemes = source
+            .split_once("config.color_schemes = config.color_schemes or {}")
+            .expect("Kaku schemes")
+            .1
+            .split_once("config.color_scheme = resolve_kaku_color_scheme")
+            .expect("end of Kaku schemes")
+            .0;
+        // Evaluate only palette literals, without startup handlers or user config.
+        let lua = mlua::Lua::new();
+        let palettes: std::collections::HashMap<String, crate::Palette> = lua.load(format!(
+            "local config = {{ color_schemes = {{}} }}\nlocal KAKU = {{{constants}\n}}\n{schemes}\nreturn config.color_schemes"
+        )).eval().expect("bundled palette literals");
+        for name in ["Kaku Dark", "Kaku Light", "Kaku Theme"] {
+            let expected = palettes.get(name).expect("bundled Kaku palette");
+            assert_eq!(
+                crate::ColorSchemeRegistry::new().get(name),
+                Some(expected.clone()),
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn builtin_kaku_schemes_work_without_loading_bundled_defaults() {
+        for (name, background) in [
+            ("Kaku Dark", (0x15, 0x14, 0x1b)),
+            ("Kaku Light", (0xff, 0xfc, 0xf0)),
+            ("Kaku Theme", (0x15, 0x14, 0x1b)),
+        ] {
+            let mut config = crate::Config::default();
+            config.color_scheme = Some(name.to_string());
+            let palette = config.resolve_color_scheme().expect("built-in Kaku scheme");
+            assert_eq!(palette.background, Some(background.into()));
+            assert_eq!(
+                config
+                    .compute_extra_defaults(None)
+                    .resolved_palette
+                    .background,
+                Some(background.into())
+            );
+            if name != "Kaku Theme" {
+                assert!(crate::ColorSchemeRegistry::available_schemes().contains(&name));
+            }
+            assert_eq!(crate::build_default_schemes().get(name), Some(&palette));
+        }
+    }
+
+    #[test]
+    fn user_kaku_scheme_definition_takes_priority_over_builtin() {
+        let mut config = crate::Config::default();
+        config.color_scheme = Some("Kaku Light".to_string());
+        let palette = crate::Palette {
+            background: Some((0x12, 0x34, 0x56).into()),
+            ..Default::default()
+        };
+        config
+            .color_schemes
+            .insert("Kaku Light".into(), palette.clone());
+        assert_eq!(config.resolve_color_scheme(), Some(palette));
+    }
+
     use super::*;
 
     #[test]

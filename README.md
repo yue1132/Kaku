@@ -30,12 +30,14 @@ Download the [Kaku DMG](https://github.com/tw93/Kaku/releases/latest), open it, 
 brew install tw93/tap/kakuku
 ```
 
-Open Kaku to set up shell integration. Missing optional tools can be installed through `kaku init`.
+Open Kaku to set up shell integration. Missing optional tools can be installed through `kaku init`. Check your installed version with `kaku --version`.
 
 ## Features
 
 - **Ready to use**: JetBrains Mono, automatic dark and light themes, copy on select, and familiar Mac shortcuts.
 - **Tabs and panes**: Split your workspace, find a pane with Tab Navigator, and restore windows, panes, and working directories when you reopen Kaku.
+- **Right-click menu**: Paste, search, open AI chat, and split or close the clicked pane without remembering shortcuts.
+- **Clickable links**: `Cmd + Click` opens URLs and file paths; URLs automatically wrapped by the terminal keep their full address.
 - **AI-friendly**: Use your coding tools alongside an optional assistant for command suggestions and chat. Configure your own AI service with `kaku ai`.
 - **Shell tools**: Built-in zsh completion, syntax highlighting, and directory jumping, with shortcuts for optional Lazygit and Yazi installations.
 - **Lua configuration**: Customize fonts, themes, shortcuts, and terminal behavior using WezTerm's Lua configuration system.
@@ -58,6 +60,8 @@ Open Kaku to set up shell integration. Missing optional tools can be installed t
 | Open Lazygit | `Cmd + Shift + G` |
 | Yazi File Manager | `Cmd + Shift + Y` or `y` |
 | Clear Screen | `Cmd + K` |
+| Open Context Menu | Right-click in a pane |
+| Open URL or File Path | `Cmd + Click` |
 
 Full keybinding reference: [docs/keybindings.md](docs/keybindings.md)
 

@@ -1,25 +1,33 @@
-# V0.19.0 Restored
+# V0.20.0 Steady
 
 <div align="center">
   <img src="https://raw.githubusercontent.com/tw93/Kaku/main/assets/logo.png" alt="Kaku Logo" width="120" height="120" />
-  <h1 style="margin: 12px 0 6px;">Kaku V0.19.0</h1>
+  <h1 style="margin: 12px 0 6px;">Kaku V0.20.0</h1>
   <p><em>A fast, out-of-the-box terminal built for AI coding.</em></p>
 </div>
 
 ### Changelog
 
-1. **Pane Input Broadcast Removed**: It was too easy to trigger by accident and could repeat a risky command in unrelated panes, so existing key assignments now do nothing.
-2. **Sessions Restore More Completely**: Reopening Kaku brings back your windows, their panes, and each pane's directory, and one pane that fails to save no longer costs you the rest.
-3. **Closing No Longer Hits the Wrong Pane**: A close confirmation stays tied to the pane it belongs to, and closing the active tab leaves you on the expected one.
-4. **Display and Integration Fixes**: Light-theme selections stay visible, lazygit works in nested shells, clearing history leaves full-screen programs intact, tab renaming no longer freezes titles, and slow synchronized output stops tearing.
+1. **Window Behavior**: Native macOS dragging and edge tiling work again, closing windows no longer triggers a delayed repaint crash, and new windows skip repeated waits after graphics initialization fails.
+2. **Shell Integration**: Returning to the prompt clears stray mouse reports after a TUI exits unexpectedly, tmux keeps its prompt and Smart Tab, and fish grep completion expands correctly.
+3. **AI Model Selection**: Switching providers no longer reuses the previous provider's model list, all returned models are shown, and manually configured models remain available.
+4. **AI Chat**: Chats include local project type information without probing local projects during remote sessions, and cancellation interrupts retry waits promptly.
+5. **Context Menu**: Right-click to paste, search, open AI chat, or manage panes, with an option in Settings to show the new-tab button.
+6. **Theme Settings**: Standalone configurations can use the built-in light and dark themes, Settings saves to the custom configuration used at launch, manual color overrides are shown explicitly, and Fancy tabs use the selected theme.
+7. **Link Detection**: Unrelated text after a hard newline stays out of link targets while automatically wrapped URLs keep their complete addresses.
+8. **Version Reporting**: The GUI executable reports its package version without initializing a window.
 
 ### 更新日志
 
-1. **移除分屏输入广播**：这个功能容易误触，会把危险命令重复到无关分屏，原有快捷键保留但不再生效。
-2. **会话恢复更完整**：重新打开时窗口、分屏和各自的目录都会还原，个别分屏未能保存也不影响其余。
-3. **关闭不再误伤其他分屏**：确认框始终对应打开它的分屏，关闭当前标签页后会停在预期的标签页。
-4. **显示与集成修复**：浅色主题选中内容清晰可见，lazygit 支持嵌套 shell，清空历史不打断全屏程序，重命名标签页不卡住标题，慢速同步输出不再撕裂。
+1. **窗口操作**：恢复 macOS 原生拖动和边缘平铺，修复关闭窗口后可能出现的崩溃，图形初始化失败后新窗口不再重复等待。
+2. **Shell 集成**：修复 TUI 异常退出后鼠标移动产生乱码的问题，保留 tmux 中的提示符和智能补全，并修正 fish 的 grep 补全展开。
+3. **AI 模型选择**：切换服务后不再沿用旧服务的模型列表，完整展示服务返回的模型，并保留手动配置的模型。
+4. **AI 对话**：补充当前项目类型信息，远程会话不读取本机项目，取消请求时不再等待重试倒计时结束。
+5. **右键菜单**：支持粘贴、搜索、AI 对话和分屏操作，也可以在设置中开启新建标签页按钮。
+6. **主题设置**：独立配置也能使用内置深浅主题，通过自定义配置启动时设置会保存到对应文件，手动配色覆盖主题时会显示说明，Fancy 标签栏也会跟随主题配色。
+7. **链接识别**：避免把换行后的无关输出拼进链接，保留自动折行网址的完整地址。
+8. **版本查询**：图形程序的版本查询无需初始化窗口即可正确返回。
 
-Special thanks to @shlroland and @dufu1991 for their contributions to this release.
+Special thanks to @elonnzhang, @trxuan, and @yansigit for their contributions to this release.
 
 > https://github.com/tw93/Kaku

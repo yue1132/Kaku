@@ -34,13 +34,13 @@ Use this skill for maintenance work that spans GitHub issues, pull requests, loc
 5. **Follow up publicly**
    - Post fixed/closed replies only after the relevant GitHub Actions run on `main` is green.
    - Confirm each item identity again before posting.
-   - Match the opener's language when it is Chinese or English. Use English for Japanese or Korean unless the maintainer says otherwise.
+   - Match the reporter's language, including Japanese and Korean, unless the maintainer explicitly requests another language.
    - Start with `@login`, one short thanks, the concrete fix or reason, and the next release, nightly, or verification step.
    - Use Nightly as a test path only after verifying it was rebuilt for the fix. `nightly` is a rolling GitHub prerelease produced by `./scripts/nightly.sh`; a push to `main` alone does not refresh the DMG.
    - For merged contributor PRs, leave at most one short thanks comment after merge or Nightly availability, and avoid duplicating bot or deployment noise.
-   - Propose closure and wait for maintainer confirmation this turn before closing (root `AGENTS.md` closure pipeline). Once confirmed, close with `--reason completed`.
+   - If the current request authorizes closure, complete the root `AGENTS.md` closure pipeline and close with `--reason completed`; otherwise propose closure and wait for authorization.
    - Close PRs without merging only when the fix is already covered on `main`, the direction is no longer needed, the patch is unsafe, the work is duplicate, or the maintainer explicitly rejects it.
-   - If an accepted contributor fix lands through a maintainer commit, mention the landed commit and co-author credit in the PR comment.
+   - If an accepted contributor fix lands through a maintainer commit, acknowledge the contribution and explain the delivered fix in the PR comment without commit hashes or internal attribution bookkeeping.
 
 ## Final Report
 

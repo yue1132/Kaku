@@ -104,7 +104,7 @@ fi
 if [[ "$UPLOAD_ONLY" -eq 0 ]]; then
     log "Building $PROFILE universal bundle (Developer ID signed)..."
     # Filter the noisy ranlib warning, but preserve build.sh's exit code via
-    # PIPESTATUS — `| grep ... || true` would mask any build failure.
+    # PIPESTATUS: `| grep ... || true` would mask any build failure.
     set +e
     PROFILE="$PROFILE" BUILD_ARCH=universal OUT_DIR="$OUT_DIR" \
         KAKU_REQUIRE_SIGNED_RELEASE=1 CARGO_FEATURES="$FEATURES" \
@@ -125,46 +125,21 @@ cp -f "$DMG_PATH" "$DMG_ASSET_PATH"
 SIZE=$(du -sh "$DMG_ASSET_PATH" | cut -f1)
 log "Asset ready: $DMG_ASSET_PATH ($SIZE)"
 
-# --- Release notes (official frame + auto changelog since last stable) -------
-# Matches the visual frame of a tagged release (.github/RELEASE_NOTES.md): logo
-# header, tagline, "### Changelog", footer link. The changelog itself is derived
-# from commits since the last stable tag — a nightly cannot carry the hand-
-# written bilingual prose of a curated release, so it stays English-only and is
-# clearly framed as a preview rather than faking a curated 更新日志.
+# --- Release notes (official frame + source comparison) --------------------
+# Matches the tagged release frame while keeping the generated preview notes
+# factual. Maintainers can add verified highlights after the package is ready.
 
 LAST_STABLE=$(git tag -l 'V*' --sort=-v:refname | head -n1 || true)
 BUILD_DATE=$(date -u "+%Y-%m-%d")
 CARGO_VERSION=$(grep '^version =' "$REPO_ROOT/kaku/Cargo.toml" | head -n1 | cut -d'"' -f2)
 
+# Commit subjects include reverted and superseded work, so they are not a
+# reliable user-facing changelog. Link the actual source comparison instead.
 if [[ -n "$LAST_STABLE" ]]; then
-    LOG_RANGE="$LAST_STABLE..HEAD"
-    SINCE_LABEL="$LAST_STABLE"
+    CHANGELOG="[Review changes since ${LAST_STABLE}](https://github.com/${GITHUB_REPO}/compare/${LAST_STABLE}...${FULL_SHA})"
 else
-    LOG_RANGE="HEAD~20..HEAD"
-    SINCE_LABEL="recent work"
+    CHANGELOG="[Review the source history](https://github.com/${GITHUB_REPO}/commits/${FULL_SHA})"
 fi
-
-# Clean raw commit subjects toward the curated changelog look: drop non-user-
-# facing prefixes, strip the conventional-commit type/scope, move leading issue
-# refs to the end, and capitalize the first letter.
-CHANGELOG=$(git log "$LOG_RANGE" --no-merges --pretty='%s' \
-    | grep -vE '^(docs|chore|ci|build|test|style)(\([^)]*\))?!?: ' \
-    | awk '
-        {
-            line = $0
-            sub(/^[a-z]+(\([^)]*\))?!?: /, "", line)
-            if (match(line, /^#[0-9]+([ ,]+#[0-9]+)*[ ]+/)) {
-                refs = substr(line, 1, RLENGTH)
-                rest = substr(line, RLENGTH + 1)
-                gsub(/[ ]+$/, "", refs)
-                gsub(/[ ]+/, ", ", refs)
-                line = rest " (" refs ")"
-            }
-            line = toupper(substr(line, 1, 1)) substr(line, 2)
-            printf "%d. %s\n", ++n, line
-        }
-    ')
-[[ -z "$CHANGELOG" ]] && CHANGELOG="1. Maintenance and internal changes since ${SINCE_LABEL}."
 
 NOTES_FILE=$(mktemp /tmp/kaku-nightly-notes.XXXXXX.md)
 trap 'rm -f "$LOCK" "$NOTES_FILE"' EXIT

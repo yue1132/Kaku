@@ -78,6 +78,25 @@ if command -v zsh >/dev/null 2>&1; then
     fail "generated kaku.zsh failed 'zsh -n' parse check"
   fi
 
+  # Execute the generated prompt hook, not a source-text match (#551).
+  mouse_reset="$(HOME="$tmp_home" TERM=xterm-256color TERM_PROGRAM=Kaku zsh -dfc '
+    add-zsh-hook() { :; }
+    source "$HOME/.config/kaku/zsh/kaku.zsh" >/dev/null
+    (( ${precmd_functions[(Ie)_kaku_reset_mouse_tracking]} )) || exit 1
+    _kaku_reset_mouse_tracking
+  ')" || fail "mouse recovery hook is not registered"
+  [[ "$mouse_reset" == $'\e[?1000;1002;1003;1004;1005;1006;1007;1016l' ]] \
+    || fail "prompt did not reset stale mouse/focus reporting"
+
+  outside_reset="$(HOME="$tmp_home" TERM_PROGRAM=Apple_Terminal zsh -dfc '
+    add-zsh-hook() { :; }
+    source "$HOME/.config/kaku/zsh/kaku.zsh" >/dev/null
+    unset TMUX
+    export KAKU_SESSION=1
+    _kaku_reset_mouse_tracking || exit 1
+  ')" || fail "mouse hook must not stop later prompt hooks outside Kaku"
+  [[ -z "$outside_reset" ]] || fail "mouse hook changed a different terminal"
+
   starship_stub_dir="$tmp_dir/starship-bin"
   starship_marker="$tmp_dir/starship-initialized"
   mkdir -p "$starship_stub_dir"

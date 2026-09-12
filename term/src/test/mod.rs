@@ -1753,6 +1753,40 @@ fn test_cursor_hidden_before_alt_screen_stays_hidden() {
 }
 
 #[test]
+fn shell_prompt_reset_stops_abandoned_mouse_reports() {
+    use crate::input::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+
+    let writer = SharedWriter::default();
+    let mut term = TestTerm::new_with_writer(5, 10, 100, Box::new(writer.clone()));
+    let movement = MouseEvent {
+        kind: MouseEventKind::Move,
+        x: 2,
+        y: 1,
+        x_pixel_offset: 0,
+        y_pixel_offset: 0,
+        button: MouseButton::None,
+        modifiers: KeyModifiers::NONE,
+    };
+    // A TUI that exits without DECRST leaves motion reporting active.
+    term.print("\x1b[?1003;1006h");
+    term.mouse_event(movement).unwrap();
+    wait_for_writer_output(&writer, b"\x1b[<35;3;2M");
+    assert!(term.is_mouse_grabbed());
+
+    // This is the recovery sequence emitted by both managed prompt hooks.
+    term.print("\x1b[?1000;1002;1003;1004;1005;1006;1007;1016l");
+    writer.clear();
+    term.mouse_event(MouseEvent { x: 3, ..movement }).unwrap();
+    assert!(!term.is_mouse_grabbed());
+    assert!(writer.snapshot().is_empty());
+
+    // Starting another TUI can immediately request mouse input again.
+    term.print("\x1b[?1003;1006h");
+    term.mouse_event(movement).unwrap();
+    wait_for_writer_output(&writer, b"\x1b[<35;3;2M");
+}
+
+#[test]
 fn test_alternate_scroll_mode_marks_mouse_grabbed() {
     let mut term = TestTerm::new(5, 10, 100);
     assert!(!term.is_mouse_grabbed());

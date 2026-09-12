@@ -107,6 +107,7 @@ jobs:
       - name: Shell integration smoke tests
         run: |
           set -euo pipefail
+          command -v fish >/dev/null || brew install fish
           tests=(
             assets/shell-integration/tests/normalize_kaku_source_line_smoke.sh
             assets/shell-integration/tests/cleanup_legacy_inline_block_smoke.sh

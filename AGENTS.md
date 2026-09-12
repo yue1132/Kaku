@@ -60,9 +60,9 @@ make app
 - Before commenting on or closing an item, confirm its title, state, and author with `gh issue view` or `gh pr view`.
 - Do not close issues or PRs on local green alone. For fixes pushed to `main`, wait for the new GitHub Actions run on `main` to pass before posting fixed/closed replies.
 - The rolling `nightly` release is not rebuilt by push. Before sending users to Nightly, run or verify `./scripts/nightly.sh` and confirm `gh release view nightly --json tagName,targetCommitish,publishedAt,assets,url` points at the fix commit and includes `Kaku-nightly.dmg`.
-- Default issue-closure pipeline once a fix is verified: commit the fix, refresh the `nightly` release assets per the rule above, reply in the reporter's language with the Nightly download or in-app update path, then propose closure and wait for maintainer confirmation. Do not promise a specific packaged-release date in replies.
+- Default issue-closure pipeline once a fix is verified: commit the fix, refresh the `nightly` release assets per the rule above, reply in the reporter's language with the Nightly download or in-app update path, then close if the current request already authorizes closure; otherwise propose it and wait for authorization. Do not promise a specific packaged-release date in replies.
 - Before pushing `main`, run `git fetch origin main` and verify `origin/main` has not moved unexpectedly. If it moved, stop and review `origin/main..HEAD` before pushing.
-- If an accepted PR's equivalent fix lands on `main` outside the contributor branch, state the landed commit and co-author status in the PR before closing it.
+- If an accepted PR's equivalent fix lands outside the contributor branch, acknowledge the contribution and explain which user-visible fix was delivered before closing it; keep commit hashes and internal attribution bookkeeping out of the public reply.
 
 ## Investigation Order
 

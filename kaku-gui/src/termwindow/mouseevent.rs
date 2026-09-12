@@ -2658,11 +2658,17 @@ mod tests {
 
     #[test]
     fn context_menu_dispatch_retains_stable_pane_id() {
-        let mouse_source = include_str!("mouseevent.rs");
+        // Inspect production code only so these assertions cannot satisfy themselves.
+        let mouse_source = include_str!("mouseevent.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .expect("mouse event production source");
         let window_source = include_str!("mod.rs");
 
-        assert!(mouse_source.contains("RepresentedItem::KeyAssignmentForPane"));
-        assert!(window_source.contains("WindowEvent::PerformKeyAssignmentForPane"));
-        assert!(window_source.contains("focus_pane_and_containing_tab(pane_id)"));
+        assert!(mouse_source
+            .contains("item.set_represented_item(RepresentedItem::KeyAssignmentForPane {"));
+        assert!(window_source
+            .contains("WindowEvent::PerformKeyAssignmentForPane { action, pane_id } =>"));
+        assert!(window_source.contains("if mux.focus_pane_and_containing_tab(pane_id).is_err() {"));
     }
 }
