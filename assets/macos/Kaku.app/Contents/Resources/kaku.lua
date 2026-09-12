@@ -2750,7 +2750,10 @@ local function ensure_remote_mount(sshfs_cmd, remote_target, mount_path)
     if message == "" then
       message = "non-interactive SSH auth failed; key or agent auth is required"
     end
-    return false, message
+    -- Third value marks "this host wants a password": sshfs spawns its
+    -- own ssh, so it cannot reuse the pane's session, and there is no
+    -- prompt to answer here.  Callers fall back to the built-in browser.
+    return false, message, true
   end
 
   local volume_name = "Kaku-" .. sanitize_mount_component(remote_target)
@@ -2838,9 +2841,23 @@ local function open_remote_files(window, pane)
   end
 
   local mount_path = remote_files_mount_root .. "/" .. sanitize_mount_component(remote_target)
-  local mount_ok, mount_or_err = ensure_remote_mount(sshfs_cmd, remote_target, mount_path)
+  local mount_ok, mount_or_err, needs_password =
+    ensure_remote_mount(sshfs_cmd, remote_target, mount_path)
   if not mount_ok then
-    show_remote_files_toast(window, "Mount failed: " .. mount_or_err, 6000)
+    if needs_password then
+      -- Opening the mount cannot ask for a password, so hand the user the
+      -- browser that can: it authenticates over the pane's target.
+      window:perform_action(wezterm.action.EmitEvent('kaku-sftp'), pane)
+      show_remote_files_toast(
+        window,
+        "sshfs needs key auth on this host ("
+          .. mount_or_err
+          .. "); opened the built-in browser instead",
+        9000
+      )
+    else
+      show_remote_files_toast(window, "Mount failed: " .. mount_or_err, 6000)
+    end
     return
   end
 
