@@ -244,6 +244,16 @@ fn handle_key(
             panel.move_cursor(1, visible);
             Ok(Handled::Consumed)
         }
+        // u: drop the whole selection at once (Space toggles one entry).
+        KeyCode::Char('u') => {
+            let cleared = app.panel_mut(side).marked.len();
+            app.panel_mut(side).marked.clear();
+            app.set_message(match cleared {
+                0 => "nothing selected".to_string(),
+                n => format!("selection cleared ({n})"),
+            });
+            Ok(Handled::Consumed)
+        }
         KeyCode::Char('.') => {
             let panel = app.panel_mut(side);
             let path = panel.path.clone();
@@ -635,6 +645,15 @@ fn transfer_marked(app: &mut App) {
             dest_size,
             cut_source: false,
         });
+    }
+
+    // The selection is consumed by the action it was made for: the
+    // entries are queued now, so leaving them marked would ask the user
+    // to press Space over every file a second time.
+    let queues = app.panel(side).marked.len();
+    app.panel_mut(side).marked.clear();
+    if queues > 1 {
+        app.set_message(format!("{queues} files queued"));
     }
 
     start_ready_transfers(app);
@@ -1171,6 +1190,56 @@ mod tests {
             rx.try_recv().is_err(),
             "a rejected folder was still scanned"
         );
+    }
+
+    fn entries(names: &[&str]) -> Vec<FileEntry> {
+        names
+            .iter()
+            .map(|name| FileEntry {
+                name: (*name).to_string(),
+                is_dir: false,
+                is_symlink: false,
+                size: 8,
+                mode: Some(0o644),
+            })
+            .collect()
+    }
+
+    /// `u` drops the whole selection; Space is the per-entry toggle.
+    #[test]
+    fn u_clears_the_selection() {
+        let mut app = test_app();
+        let panel = app.panel_mut(PanelSide::Remote);
+        panel.set_entries(entries(&["a.txt", "b.txt", "c.txt"]));
+        panel.marked.insert(0);
+        panel.marked.insert(2);
+
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let key = termwiz::input::KeyEvent {
+            key: KeyCode::Char('u'),
+            modifiers: Modifiers::NONE,
+        };
+        handle_key(&key, &mut app, InputContext { req_tx: &tx }).unwrap();
+
+        assert!(app.panel(PanelSide::Remote).marked.is_empty());
+        assert_eq!(app.message.as_deref(), Some("selection cleared (2)"));
+    }
+
+    /// The selection belongs to the action it was made for: once F5 has
+    /// queued the entries, they must not stay marked, or the file that was
+    /// just uploaded keeps looking as if it were still selected.
+    #[test]
+    fn transfer_consumes_the_selection() {
+        let mut app = test_app();
+        let panel = app.panel_mut(PanelSide::Remote);
+        panel.set_entries(entries(&["a.txt", "b.txt", "c.txt"]));
+        panel.marked.insert(0);
+        panel.marked.insert(1);
+
+        transfer_marked(&mut app);
+
+        assert!(app.panel(PanelSide::Remote).marked.is_empty());
+        assert_eq!(app.message.as_deref(), Some("2 files queued"));
     }
 
     /// One answer consumes exactly one queued transfer.  The queue used to

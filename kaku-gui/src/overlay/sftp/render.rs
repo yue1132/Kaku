@@ -468,9 +468,15 @@ fn help_line(app: &App) -> String {
         Some(_) => " · copied (p paste)",
         None => "",
     };
+    // Marks are a row selection: say how many there are and how to drop
+    // them, otherwise they look like they persist by accident.
+    let marks = match app.panel(app.focus).marked.len() {
+        0 => String::new(),
+        n => format!(" · {n} marked (u clear)"),
+    };
     format!(
         "y copy · x cut · p paste · / filter · z jump · H/L history · F1 help · \
-         F5 transfer · D download · Enter open{clipboard}"
+         F5 transfer · D download · Enter open{marks}{clipboard}"
     )
 }
 
@@ -481,8 +487,9 @@ fn render_help(changes: &mut Vec<Change>, app: &App, cols: usize) {
     let lines = [
         "j/k ↑/↓ move            Tab   switch panel",
         "h/l ←/→ parent / open   Enter open, Space mark",
-        "gg / G  top / bottom    Ctrl+d/u half page",
-        "o open with default app D download to ~/Downloads",
+        "u clear selection       gg/G  top / bottom",
+        "Ctrl+d/u half page      o open with default app",
+        "D download to ~/Downloads",
         "/  or f  filter listing  z jumpto a path",
         "H / L    back / forward  . show hidden files",
         "y copy   x cut   p paste",
