@@ -142,6 +142,11 @@ fn handle_key(
         return Ok(Handled::Consumed);
     }
 
+    // The `w` task list is modal too, but keeps its own keys.
+    if app.tasks {
+        return handle_tasks_key(key, app);
+    }
+
     // Input-line modes capture plain keys first.
     if app.input_mode.is_some() {
         return handle_input_line(key, app, ctx);
@@ -296,6 +301,12 @@ fn handle_key(
         KeyCode::Char('f') => {
             app.input_mode = Some(InputMode::JumpToChar);
             app.input_line.clear();
+            Ok(Handled::Consumed)
+        }
+        // w: the transfer list (yazi's tasks view).
+        KeyCode::Char('w') => {
+            app.tasks = true;
+            app.tasks_cursor = 0;
             Ok(Handled::Consumed)
         }
         // F1 and ?: the full key reference (any key closes it).  `?` also
@@ -533,6 +544,66 @@ fn copy_paths_to_clipboard(app: &mut App, names_only: bool) {
             app.set_message(format!("copied {} path(s)", lines.len()));
         }
         None => app.set_message("clipboard unavailable"),
+    }
+}
+
+/// Keys while the transfer list is open: move, cancel, clear, close.
+fn handle_tasks_key(key: &termwiz::input::KeyEvent, app: &mut App) -> Result<Handled, bool> {
+    let count = app
+        .transfers
+        .as_ref()
+        .map(|manager| manager.statuses().len())
+        .unwrap_or(0);
+    let last = count.saturating_sub(1);
+    match key.key {
+        KeyCode::Char('w') | KeyCode::Escape | KeyCode::Char('q') => {
+            app.tasks = false;
+            Ok(Handled::Consumed)
+        }
+        KeyCode::Char('j') | KeyCode::DownArrow => {
+            app.tasks_cursor = (app.tasks_cursor + 1).min(last);
+            Ok(Handled::Consumed)
+        }
+        KeyCode::Char('k') | KeyCode::UpArrow => {
+            app.tasks_cursor = app.tasks_cursor.saturating_sub(1);
+            Ok(Handled::Consumed)
+        }
+        KeyCode::Char('g') | KeyCode::Home => {
+            app.tasks_cursor = 0;
+            Ok(Handled::Consumed)
+        }
+        KeyCode::Char('G') | KeyCode::End => {
+            app.tasks_cursor = last;
+            Ok(Handled::Consumed)
+        }
+        // x: stop the selected transfer (if it is still running).
+        KeyCode::Char('x') => {
+            let cancelled = app.transfers.as_ref().and_then(|manager| {
+                let statuses = manager.statuses();
+                let status = statuses.get(app.tasks_cursor)?;
+                if status.state.is_terminal() {
+                    return None;
+                }
+                let id = status.id;
+                manager.cancel(id);
+                Some(id)
+            });
+            app.set_message(match cancelled {
+                Some(_) => "cancelling transfer".to_string(),
+                None => "nothing to cancel here".to_string(),
+            });
+            Ok(Handled::Consumed)
+        }
+        // c: drop the finished rows, keep what is still running.
+        KeyCode::Char('c') => {
+            if let Some(manager) = &app.transfers {
+                manager.clear_finished();
+                app.tasks_cursor = 0;
+                app.set_message("cleared finished transfers");
+            }
+            Ok(Handled::Consumed)
+        }
+        _ => Ok(Handled::Consumed),
     }
 }
 
@@ -1625,6 +1696,35 @@ mod tests {
         assert_ne!(a, b);
         assert_ne!(a, other_host);
         assert!(a.ends_with("report.txt"));
+    }
+
+    /// `w` opens the transfer list, and the list swallows the panel keys
+    /// while it is up (j/k move, w/Esc closes).
+    #[test]
+    fn w_opens_and_closes_the_transfer_list() {
+        let mut app = test_app();
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let ctx = InputContext { req_tx: &tx };
+        let press = |key: KeyCode| termwiz::input::KeyEvent {
+            key,
+            modifiers: Modifiers::NONE,
+        };
+
+        handle_key(&press(KeyCode::Char('w')), &mut app, ctx).unwrap();
+        assert!(app.tasks, "w did not open the transfer list");
+
+        // Panel keys must not leak through while the list is open.
+        handle_key(&press(KeyCode::Char('d')), &mut app, ctx).unwrap();
+        assert!(
+            app.input_mode.is_none(),
+            "a panel key leaked into the transfer list"
+        );
+        assert!(app.pending.is_empty());
+
+        handle_key(&press(KeyCode::Char('j')), &mut app, ctx).unwrap();
+        assert_eq!(app.tasks_cursor, 0, "cursor moved past an empty list");
+        handle_key(&press(KeyCode::Escape), &mut app, ctx).unwrap();
+        assert!(!app.tasks, "Esc did not close the transfer list");
     }
 
     /// A half-typed chord does not swallow the next keystroke.

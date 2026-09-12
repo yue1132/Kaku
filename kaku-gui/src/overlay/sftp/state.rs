@@ -424,6 +424,9 @@ pub(crate) struct App {
     pub pending_reveal: Option<(u64, PathBuf)>,
     /// F1 key reference is on screen.
     pub help: bool,
+    /// `w` task list is on screen, with the selected row.
+    pub tasks: bool,
+    pub tasks_cursor: usize,
     /// Paths yanked with `y`/`x`, waiting for `p`.
     pub clipboard: Option<Clipboard>,
     /// Transfers that should remove their source once they land (a cut).
@@ -472,6 +475,8 @@ impl App {
             overwrite_all: None,
             mouse_left_down: false,
             help: false,
+            tasks: false,
+            tasks_cursor: 0,
             clipboard: None,
             cut_pending: Vec::new(),
             pending_reveal: None,

@@ -69,6 +69,13 @@ fn frame_changes(app: &App, history: &mut TransferHistory) -> Vec<Change> {
     changes.push(Change::ClearScreen(termwiz::color::ColorAttribute::Default));
 
     let cols = app.cols.max(20);
+    if app.tasks {
+        render_tasks(&mut changes, app, history, cols);
+        changes.push(Change::CursorVisibility(CursorVisibility::Hidden));
+        changes.push(Change::Text("\x1b[?2026l".to_string()));
+        return changes;
+    }
+
     if app.help {
         render_help(&mut changes, app, cols);
 
@@ -492,7 +499,7 @@ fn help_line(app: &App) -> String {
     };
     format!(
         "j/k move · y/x/p copy-cut-paste · a new · r rename · d delete · Space mark · \
-         / filter · f jump · F5 transfer · ? help{marks}{clipboard}"
+         / filter · f jump · F5 transfer · w transfers · ? help{marks}{clipboard}"
     )
 }
 
@@ -507,6 +514,7 @@ fn render_help(changes: &mut Vec<Change>, app: &App, cols: usize) {
         "Ctrl+d/u half page      Ctrl+f/b full page",
         "gg/G top / bottom       o open with default app",
         "y copy  x cut  p paste  P paste (overwrite)",
+        "w transfers (x cancel)  c clear finished",
         "Y / X cancel the yank   D download to ~/Downloads",
         "a new (name/ = folder)  r rename   d delete",
         "/  or F  filter listing  f jump to a name, z jump to a path",
@@ -526,7 +534,7 @@ fn render_help(changes: &mut Vec<Change>, app: &App, cols: usize) {
             changes,
             row + 1,
             0,
-            &body[..body.len().min(width.saturating_sub(2))],
+            clip_bytes(&body, width.saturating_sub(2)),
             &pal.plain_cell(),
             &pal.focused_border_cell(),
         );
@@ -539,6 +547,152 @@ fn render_help(changes: &mut Vec<Change>, app: &App, cols: usize) {
         &bottom,
         &pal.focused_border_cell(),
     );
+}
+
+/// `w`: the transfer list, yazi's task manager.
+fn render_tasks(changes: &mut Vec<Change>, app: &App, history: &mut TransferHistory, cols: usize) {
+    let pal = &app.palette;
+    let statuses = app
+        .transfers
+        .as_ref()
+        .map(|manager| manager.statuses())
+        .unwrap_or_default();
+    let running = statuses
+        .iter()
+        .filter(|status| !status.state.is_terminal())
+        .count();
+    let title = format!(
+        "Transfers · {running} running · {} finished",
+        statuses.len() - running
+    );
+    let width = cols.max(20);
+    let top = border_row('┌', '┐', '─', &format!(" {title} "), width);
+    push_line(changes, 0, 0, &top, &pal.focused_border_cell());
+
+    if statuses.is_empty() {
+        let body = format!(
+            "{:<width$}",
+            " nothing transferred yet ",
+            width = width.saturating_sub(2)
+        );
+        push_bordered_line(
+            changes,
+            1,
+            0,
+            clip_bytes(&body, width.saturating_sub(2)),
+            &pal.dim_cell(),
+            &pal.focused_border_cell(),
+        );
+    }
+
+    for (row, status) in statuses.iter().enumerate() {
+        let speed = match status.state {
+            crate::sftp_transfer::TransferState::Running { bytes, .. } => {
+                history.speed(status.id, bytes)
+            }
+            _ => None,
+        };
+        let text = format_task_line(status, speed, width.saturating_sub(4));
+        let selected = row == app.tasks_cursor;
+        let attrs = if selected {
+            pal.cursor_cell()
+        } else if status.state.is_terminal() {
+            match status.state {
+                crate::sftp_transfer::TransferState::Failed(_) => pal.error_cell(),
+                _ => pal.dim_cell(),
+            }
+        } else {
+            pal.plain_cell()
+        };
+        let body = format!(" {text:<pad$}", pad = width.saturating_sub(3));
+        let body = clip_bytes(&body, width.saturating_sub(2));
+        push_bordered_line(
+            changes,
+            row + 1,
+            0,
+            body,
+            &attrs,
+            &pal.focused_border_cell(),
+        );
+    }
+
+    let footer_row = statuses.len().max(1) + 1;
+    let hint = " j/k move · x cancel · c clear finished · w or Esc close ";
+    let body = format!("{hint:<pad$}", pad = width.saturating_sub(2));
+    push_bordered_line(
+        changes,
+        footer_row,
+        0,
+        clip_bytes(&body, width.saturating_sub(2)),
+        &pal.dim_cell(),
+        &pal.focused_border_cell(),
+    );
+    let bottom = border_row('└', '┘', '─', "", width);
+    push_line(
+        changes,
+        footer_row + 1,
+        0,
+        &bottom,
+        &pal.focused_border_cell(),
+    );
+}
+
+/// One row of the transfer list: direction, state, endpoints and progress.
+fn format_task_line(
+    status: &crate::sftp_transfer::TransferStatus,
+    speed: Option<f64>,
+    width: usize,
+) -> String {
+    use crate::sftp_transfer::{format_bytes, format_speed, TransferState};
+    let glyph = status.direction.glyph();
+    let source = status
+        .source
+        .rsplit('/')
+        .find(|part| !part.is_empty())
+        .unwrap_or(status.source.as_str());
+    let state = match &status.state {
+        TransferState::Queued => "queued".to_string(),
+        TransferState::Running { bytes, total } => {
+            let percent = (*bytes * 100).checked_div(*total).unwrap_or(0).min(100);
+            match speed {
+                Some(speed) => format!(
+                    "{percent:>3}%  {}/{}  {}",
+                    format_bytes(*bytes),
+                    format_bytes(*total),
+                    format_speed(speed)
+                ),
+                None => format!(
+                    "{percent:>3}%  {}/{}",
+                    format_bytes(*bytes),
+                    format_bytes(*total)
+                ),
+            }
+        }
+        TransferState::Done => "done".to_string(),
+        TransferState::Cancelled => "cancelled".to_string(),
+        TransferState::Failed(err) => format!("failed: {err}"),
+    };
+    let dest = status
+        .dest
+        .rsplit('/')
+        .next()
+        .unwrap_or(status.dest.as_str());
+    let packed = format!("{glyph} {source}  →  {dest}   {state}");
+    truncate_visible(&packed, width)
+}
+
+/// Clip to `max` bytes without splitting a character.  Slicing a `String`
+/// by byte index panics when the index lands inside a multi-byte character,
+/// and remote file names are often not ASCII.
+fn clip_bytes(text: &str, max: usize) -> &str {
+    if text.len() <= max {
+        return text;
+    }
+    let mut end = max;
+    while end > 0 && !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    &text[..end]
 }
 
 /// Truncate to `width` display columns with an ellipsis marker.
@@ -587,6 +741,128 @@ mod tests {
                 _ => None,
             })
             .collect()
+    }
+
+    fn status(state: crate::sftp_transfer::TransferState) -> crate::sftp_transfer::TransferStatus {
+        crate::sftp_transfer::TransferStatus {
+            id: 7,
+            direction: crate::sftp_transfer::Direction::Upload,
+            source: "/local/big.iso".to_string(),
+            dest: "/remote/dir/big.iso".to_string(),
+            state,
+        }
+    }
+
+    /// One row per transfer, saying where it is and how far along.
+    #[test]
+    fn task_rows_describe_each_transfer() {
+        use crate::sftp_transfer::{format_speed, TransferState};
+
+        let running = format_task_line(
+            &status(TransferState::Running {
+                bytes: 512 * 1024,
+                total: 1024 * 1024,
+            }),
+            Some(2.0 * 1024.0 * 1024.0),
+            120,
+        );
+        assert!(running.contains("big.iso"), "no file name: {}", running);
+        assert!(running.contains("50%"), "no percentage: {}", running);
+        assert!(
+            running.contains(&format_speed(2.0 * 1024.0 * 1024.0)),
+            "no speed: {}",
+            running
+        );
+
+        assert!(format_task_line(&status(TransferState::Done), None, 120).contains("done"));
+        assert!(
+            format_task_line(&status(TransferState::Cancelled), None, 120).contains("cancelled")
+        );
+        let failed = format_task_line(
+            &status(TransferState::Failed("disk full".into())),
+            None,
+            120,
+        );
+        assert!(failed.contains("disk full"), "no reason: {}", failed);
+        // A queued transfer has no progress to show.
+        let queued = format_task_line(&status(TransferState::Queued), None, 120);
+        assert!(queued.contains("queued"));
+
+        // Narrow panes truncate instead of overflowing the border.
+        let narrow = format_task_line(&status(TransferState::Done), None, 24);
+        assert!(
+            unicode_column_width(&narrow, None) <= 24,
+            "too wide: {}",
+            narrow
+        );
+    }
+
+    /// Rows are clipped by byte budget, so the clip must not split a
+    /// character: remote file names are often not ASCII and a split
+    /// panics the overlay thread.
+    #[test]
+    fn clip_bytes_keeps_char_boundaries() {
+        let text = "中石油天然气.xlsx";
+        for max in 0..text.len() {
+            let clipped = clip_bytes(text, max);
+            assert!(
+                text.starts_with(clipped),
+                "clip at {} did not produce a prefix",
+                max
+            );
+        }
+        assert_eq!(clip_bytes("abc", 10), "abc");
+    }
+
+    /// A multi-byte file name in a narrow pane used to panic: the row was
+    /// clipped by byte index, which can land inside a character.
+    #[test]
+    fn task_rows_clip_multi_byte_names() {
+        let mut app = test_app();
+        app.tasks = true;
+        app.cols = 30;
+        let mut history = TransferHistory::new();
+        let mut statuses_app = test_app();
+        let _ = &mut statuses_app;
+        let _ = &mut history;
+        let _ = &mut app;
+        // Render a status whose name is CJK, at a width that cuts inside it.
+        let line = format_task_line(
+            &crate::sftp_transfer::TransferStatus {
+                id: 1,
+                direction: crate::sftp_transfer::Direction::Download,
+                source: "/remote/中石油天然气股份有限公司广⋯.xlsx".to_string(),
+                dest: "/local/中石油天然气股份有限公司广⋯.xlsx".to_string(),
+                state: crate::sftp_transfer::TransferState::Done,
+            },
+            None,
+            12,
+        );
+        assert!(
+            unicode_column_width(&line, None) <= 12,
+            "too wide: {:?}",
+            line
+        );
+    }
+
+    /// The transfer view is a frame like any other, and renders with and
+    /// without anything to show.
+    #[test]
+    fn task_view_frames_are_closed() {
+        let mut app = test_app();
+        app.tasks = true;
+        let mut history = TransferHistory::new();
+        let empty = frame_changes(&app, &mut history);
+        let text: String = empty
+            .iter()
+            .filter_map(|change| match change {
+                Change::Text(text) => Some(text.clone()),
+                _ => None,
+            })
+            .collect();
+        assert!(text.contains("Transfers"), "no title: {:?}", text);
+        assert!(text.starts_with("\x1b[?2026h"));
+        assert!(text.ends_with("\x1b[?2026l"), "frame does not close");
     }
 
     /// Every input mode must render.  This used to panic for the filter and

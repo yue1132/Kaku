@@ -573,3 +573,58 @@ fn a_drop_never_clobbers_an_existing_remote_file() {
         names
     );
 }
+
+/// The `w` transfer list can clear what has finished without disturbing
+/// anything still running.
+#[test]
+fn clearing_finished_transfers_keeps_the_list_usable() {
+    if !sshd_available() {
+        eprintln!("skipping: no sshd binary");
+        return;
+    }
+    let Some(server) = Server::spawn() else {
+        eprintln!("skipping: could not start sshd");
+        return;
+    };
+    let Some(session) = server.connect() else {
+        eprintln!("skipping: could not authenticate against the test sshd");
+        return;
+    };
+    let sftp = session.sftp();
+    let root = format!("{}", server.tmp.path().join("tasks").display());
+    smol::block_on(async {
+        sftp.create_dir(&root, 0o755).await.unwrap();
+    });
+
+    let work = TempDir::new().unwrap();
+    let local = work.path().join("payload.bin");
+    std::fs::write(&local, vec![7u8; 4096]).unwrap();
+
+    let manager = TransferManager::new(session.clone());
+    manager.upload(local, format!("{root}/payload.bin"), false, true);
+    wait_for_all(&manager);
+    assert_eq!(
+        manager.statuses().len(),
+        1,
+        "the finished transfer is missing"
+    );
+    assert!(manager.statuses()[0].state.is_terminal());
+
+    manager.clear_finished();
+    assert!(
+        manager.statuses().is_empty(),
+        "finished transfer was not cleared"
+    );
+
+    // Clearing must not break the next transfer.
+    let second = work.path().join("second.bin");
+    std::fs::write(&second, vec![9u8; 1024]).unwrap();
+    let id = manager.upload(second, format!("{root}/second.bin"), false, true);
+    wait_for_all(&manager);
+    let state = manager
+        .statuses()
+        .into_iter()
+        .find(|status| status.id == id)
+        .map(|status| status.state);
+    assert_eq!(state, Some(TransferState::Done));
+}

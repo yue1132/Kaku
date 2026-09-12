@@ -599,6 +599,13 @@ impl TransferManager {
         id
     }
 
+    /// Drop finished transfers from the list (the `w` task manager uses
+    /// this to clear the history without touching anything still running).
+    pub fn clear_finished(&self) {
+        let mut statuses = self.inner.statuses.lock().unwrap();
+        statuses.retain(|status| !status.state.is_terminal());
+    }
+
     /// Ask a transfer to stop at the next chunk boundary.  Partial
     /// output files are removed.
     pub fn cancel(&self, id: TransferId) {
