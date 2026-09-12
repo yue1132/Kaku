@@ -119,7 +119,7 @@ fn frame_changes(app: &App, history: &mut TransferHistory) -> Vec<Change> {
             StatusLine::Input(_) => (app.palette.title_cell(), None),
             StatusLine::Connecting(state) => (app.palette.title_cell(), Some(state.to_string())),
             StatusLine::Error(err) => (app.palette.error_cell(), Some(err.to_string())),
-            StatusLine::Message(msg) => (app.palette.plain_cell(), Some(msg.to_string())),
+            StatusLine::Message(msg) => (app.palette.plain_cell(), Some(crate::i18n::tr(msg))),
             StatusLine::Help(hint) => (app.palette.dim_cell(), Some(hint.clone())),
         };
         changes.push(Change::AllAttributes(attrs));
@@ -421,13 +421,18 @@ fn render_input_line(app: &App, mode: &InputMode, cols: usize) -> String {
         }
         InputMode::Create { directory } => {
             let prompt = if *directory {
-                "New directory: "
+                crate::i18n::tr("New directory: ")
             } else {
-                "New file (end with / for a directory): "
+                crate::i18n::tr("New file (end with / for a directory): ")
             };
             format!("{prompt}{}_ ", app.input_line)
         }
-        InputMode::Rename { original } => format!("Rename {original} to: {}_ ", app.input_line),
+        InputMode::Rename { original } => format!(
+            "{}{} → {}_ ",
+            crate::i18n::tr("Rename "),
+            original,
+            app.input_line
+        ),
         InputMode::ConfirmDelete { names } => {
             let prompt = if names.len() == 1 {
                 format!("Delete {}? (y/n): ", names[0])
@@ -438,9 +443,9 @@ fn render_input_line(app: &App, mode: &InputMode, cols: usize) -> String {
         }
         // Live filter and path jump echo what is typed; the jump-to-char
         // prompt waits for a single letter, so it has no line to show.
-        InputMode::Filter => format!("/{}_ ", app.input_line),
-        InputMode::JumpTo => format!("jump to path: {}_ ", app.input_line),
-        InputMode::JumpToChar => "f jump to a name starting with: _ ".to_string(),
+        InputMode::Filter => format!("{}{}_ ", crate::i18n::tr("/"), app.input_line),
+        InputMode::JumpTo => format!("{}{}_ ", crate::i18n::tr("jump to path: "), app.input_line),
+        InputMode::JumpToChar => crate::i18n::tr("f jump to a name starting with: _ "),
     };
     truncate_visible(&text, cols)
 }
@@ -484,7 +489,7 @@ fn status_line(app: &App) -> Option<StatusLine<'_>> {
 
 fn help_line(app: &App) -> String {
     if app.session.is_none() {
-        return "Not connected · j/k move · Tab switch · q quit".to_string();
+        return crate::i18n::tr("Not connected · j/k move · Tab switch · q quit");
     }
     let clipboard = match &app.clipboard {
         Some(clip) if clip.cut => " · CUT ready (p paste)",
@@ -506,7 +511,7 @@ fn help_line(app: &App) -> String {
 /// F1: the full key reference, replaced by the panels while it is open.
 fn render_help(changes: &mut Vec<Change>, app: &App, cols: usize) {
     let pal = &app.palette;
-    let title = "Kaku SFTP keys";
+    let title = crate::i18n::tr("Kaku SFTP keys");
     let lines = [
         "j/k ↑/↓ move            Tab   switch panel",
         "h/l ←/→ parent / open   Enter open, Space mark",
@@ -562,19 +567,20 @@ fn render_tasks(changes: &mut Vec<Change>, app: &App, history: &mut TransferHist
         .filter(|status| !status.state.is_terminal())
         .count();
     let title = format!(
-        "Transfers · {running} running · {} finished",
-        statuses.len() - running
+        "{} · {running} {} · {} {}{}",
+        crate::i18n::tr("Transfers"),
+        crate::i18n::tr("running"),
+        statuses.len() - running,
+        crate::i18n::tr("finished"),
+        ""
     );
     let width = cols.max(20);
     let top = border_row('┌', '┐', '─', &format!(" {title} "), width);
     push_line(changes, 0, 0, &top, &pal.focused_border_cell());
 
     if statuses.is_empty() {
-        let body = format!(
-            "{:<width$}",
-            " nothing transferred yet ",
-            width = width.saturating_sub(2)
-        );
+        let empty_row = format!(" {} ", crate::i18n::tr("nothing transferred yet"));
+        let body = format!("{empty_row:<width$}", width = width.saturating_sub(2));
         push_bordered_line(
             changes,
             1,

@@ -592,7 +592,7 @@ pub struct Config {
     /// V0.11.0 still load on upgrade with a warning instead of a hard error.
     #[dynamic(
         default,
-        deprecated = "the language option was removed; Kaku's built-in UI is English-only"
+        deprecated = "config.language names the UI language; only locales shipped in assets/i18n are translated, others fall back to English"
     )]
     pub language: String,
 

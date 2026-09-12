@@ -678,12 +678,13 @@ impl CommandPalette {
                 LinearRgba::TRANSPARENT.into()
             };
 
+            let brief = crate::i18n::tr(&command.brief);
             let label = command
                 .icon
                 .as_deref()
                 .filter(|icon| !icon.is_empty())
-                .map(|icon| format!("{icon} {}", command.brief))
-                .unwrap_or_else(|| command.brief.to_string());
+                .map(|icon| format!("{icon} {brief}"))
+                .unwrap_or(brief);
 
             // Build row with better spacing
             let mut row = vec![Element::new(

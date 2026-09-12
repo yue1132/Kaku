@@ -103,6 +103,7 @@ mod customglyph;
 mod download;
 mod frontend;
 mod glyphcache;
+mod i18n;
 mod inline_ai;
 mod inputmap;
 mod local_hostname;
@@ -251,6 +252,8 @@ async fn spawn_tab_in_domain_if_mux_is_empty(
     startup_trace::mark("  mux.new_empty_window done (notification fired)");
 
     let config = config::configuration();
+    // 中文界面：只在 config.language 指定了支持的语言时生效（本仓库分支功能）。
+    i18n::init(&config.language);
     config.update_ulimit()?;
 
     startup_trace::mark("  domain.attach start");

@@ -321,7 +321,7 @@ impl LauncherState {
                     continue;
                 }
                 self.entries.push(Entry {
-                    label: cmd.brief.to_string(),
+                    label: crate::i18n::tr(&cmd.brief),
                     action: cmd.action.into(),
                 });
             }
