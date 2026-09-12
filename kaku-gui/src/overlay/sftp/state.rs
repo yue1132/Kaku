@@ -915,6 +915,24 @@ pub(crate) fn parent_path(path: &str) -> String {
 mod tests {
     use super::*;
 
+    /// macOS denials arrive as a bare `Operation not permitted`; the
+    /// panel has to name the fix, because the user sees no prompt.
+    #[test]
+    fn permission_denied_names_the_fix() {
+        let err = std::io::Error::from_raw_os_error(1);
+        let message = describe_local_error("/Users/me/Documents", &err);
+        assert!(message.contains("System Settings"), "{}", message);
+        assert!(message.contains("/Users/me/Documents"), "{}", message);
+    }
+
+    #[test]
+    fn other_local_errors_keep_the_os_message() {
+        let err = std::io::Error::from_raw_os_error(2);
+        let message = describe_local_error("/nope", &err);
+        assert!(message.contains("/nope"), "{}", message);
+        assert!(!message.contains("System Settings"), "{}", message);
+    }
+
     #[test]
     fn join_and_parent_paths_roundtrip() {
         assert_eq!(join_path("/home/u", "file"), "/home/u/file");
