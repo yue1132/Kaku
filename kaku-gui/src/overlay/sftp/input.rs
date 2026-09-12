@@ -208,7 +208,8 @@ fn handle_key(
             app.input_line = app.panel(side).filter.clone().unwrap_or_default();
             Ok(Handled::Consumed)
         }
-        KeyCode::Function(1) => {
+        // F1 and ?: the full key reference (any key closes it).
+        KeyCode::Function(1) | KeyCode::Char('?') => {
             app.help = true;
             Ok(Handled::Consumed)
         }
@@ -1203,6 +1204,24 @@ mod tests {
                 mode: Some(0o644),
             })
             .collect()
+    }
+
+    /// `?` opens the key reference, and any key closes it again.
+    #[test]
+    fn question_mark_opens_the_help() {
+        let mut app = test_app();
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let ctx = InputContext { req_tx: &tx };
+        let press = |key: KeyCode| termwiz::input::KeyEvent {
+            key,
+            modifiers: Modifiers::NONE,
+        };
+
+        handle_key(&press(KeyCode::Char('?')), &mut app, ctx).unwrap();
+        assert!(app.help, "? did not open the key reference");
+
+        handle_key(&press(KeyCode::Char('j')), &mut app, ctx).unwrap();
+        assert!(!app.help, "a key press did not close the key reference");
     }
 
     /// `u` drops the whole selection; Space is the per-entry toggle.

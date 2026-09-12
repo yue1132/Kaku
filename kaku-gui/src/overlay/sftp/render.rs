@@ -475,7 +475,7 @@ fn help_line(app: &App) -> String {
         n => format!(" · {n} marked (u clear)"),
     };
     format!(
-        "y copy · x cut · p paste · / filter · z jump · H/L history · F1 help · \
+        "y copy · x cut · p paste · / filter · z jump · H/L history · ? help · \
          F5 transfer · D download · Enter open{marks}{clipboard}"
     )
 }
@@ -496,7 +496,7 @@ fn render_help(changes: &mut Vec<Change>, app: &App, cols: usize) {
         "F5 transfer (folders recurse)   F2 rename",
         "F7 new folder                   F8 delete",
         "mouse: click selects, double click opens",
-        "q quit   F1 close this help",
+        "q quit   ? or F1 close this help",
     ];
     let width = cols.max(20);
     let top = border_row('┌', '┐', '─', &format!(" {title} "), width);
