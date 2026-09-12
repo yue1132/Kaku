@@ -267,24 +267,10 @@ impl Pane for TermWizTerminalPane {
     }
 
     fn mouse_event(&self, event: MouseEvent) -> anyhow::Result<()> {
-        use termwiz::input::MouseButtons as Buttons;
-        use wezterm_term::input::MouseButton;
-
-        let mouse_buttons = match event.button {
-            MouseButton::Left => Buttons::LEFT,
-            MouseButton::Middle => Buttons::MIDDLE,
-            MouseButton::Right => Buttons::RIGHT,
-            MouseButton::WheelUp(_) => Buttons::VERT_WHEEL | Buttons::WHEEL_POSITIVE,
-            MouseButton::WheelDown(_) => Buttons::VERT_WHEEL,
-            MouseButton::WheelLeft(_) => Buttons::HORZ_WHEEL | Buttons::WHEEL_POSITIVE,
-            MouseButton::WheelRight(_) => Buttons::HORZ_WHEEL,
-            MouseButton::None => Buttons::NONE,
-        };
-
         let event = InputEvent::Mouse(TermWizMouseEvent {
             x: event.x as u16,
             y: event.y as u16,
-            mouse_buttons,
+            mouse_buttons: held_buttons(event.kind, event.button),
             modifiers: event.modifiers,
         });
         if let Err(e) = self.input_tx.send(event) {
@@ -623,4 +609,72 @@ pub async fn run<
     .detach();
 
     result
+}
+
+/// Translate a GUI mouse event into the termwiz vocabulary.
+///
+/// termwiz has no press/release flag: `mouse_buttons` means the buttons
+/// held right now, so a release or a move must not claim one is down.
+/// Forwarding the release with its button still set made one physical
+/// click arrive as two clicks, which the file browser reads as a double
+/// click and answers by opening the entry under the cursor.
+fn held_buttons(
+    kind: wezterm_term::input::MouseEventKind,
+    button: wezterm_term::input::MouseButton,
+) -> termwiz::input::MouseButtons {
+    use termwiz::input::MouseButtons as Buttons;
+    use wezterm_term::input::{MouseButton, MouseEventKind};
+
+    match kind {
+        // A release means no button is held any more.  A move keeps whatever
+        // button is held, which is how the AI chat overlay tracks a drag
+        // selection, and a move with no button is reported as None by the
+        // caller anyway.
+        MouseEventKind::Release => Buttons::NONE,
+        MouseEventKind::Press | MouseEventKind::Move => match button {
+            MouseButton::Left => Buttons::LEFT,
+            MouseButton::Middle => Buttons::MIDDLE,
+            MouseButton::Right => Buttons::RIGHT,
+            MouseButton::WheelUp(_) => Buttons::VERT_WHEEL | Buttons::WHEEL_POSITIVE,
+            MouseButton::WheelDown(_) => Buttons::VERT_WHEEL,
+            MouseButton::WheelLeft(_) => Buttons::HORZ_WHEEL | Buttons::WHEEL_POSITIVE,
+            MouseButton::WheelRight(_) => Buttons::HORZ_WHEEL,
+            MouseButton::None => Buttons::NONE,
+        },
+    }
+}
+
+#[cfg(test)]
+mod mouse_tests {
+    use super::held_buttons;
+    use termwiz::input::MouseButtons as Buttons;
+    use wezterm_term::input::{MouseButton, MouseEventKind};
+
+    #[test]
+    fn only_a_release_clears_the_held_button() {
+        assert_eq!(
+            held_buttons(MouseEventKind::Press, MouseButton::Left),
+            Buttons::LEFT
+        );
+        // One physical click is a press plus a release; if the release also
+        // reported LEFT, a TUI would see two clicks per click.
+        assert_eq!(
+            held_buttons(MouseEventKind::Release, MouseButton::Left),
+            Buttons::NONE
+        );
+        // A drag keeps the button held, which is what the chat overlay uses
+        // to extend a selection.
+        assert_eq!(
+            held_buttons(MouseEventKind::Move, MouseButton::Left),
+            Buttons::LEFT
+        );
+        assert_eq!(
+            held_buttons(MouseEventKind::Move, MouseButton::None),
+            Buttons::NONE
+        );
+        assert_eq!(
+            held_buttons(MouseEventKind::Press, MouseButton::WheelUp(1)),
+            Buttons::VERT_WHEEL | Buttons::WHEEL_POSITIVE
+        );
+    }
 }
