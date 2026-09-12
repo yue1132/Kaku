@@ -52,6 +52,17 @@ pub(crate) fn render(
     app: &App,
     history: &mut TransferHistory,
 ) -> termwiz::Result<()> {
+    let changes = frame_changes(app, history);
+    term.render(&changes)?;
+    term.flush()
+}
+
+/// Everything one frame draws, including both ends of the synchronized
+/// update.  Kept separate from [render] so a test can check that the
+/// frame is always closed: an unclosed `?2026` frame leaves the screen
+/// frozen on the previous one, which is exactly how `?` looked like a
+/// dead key while the key handler was working.
+fn frame_changes(app: &App, history: &mut TransferHistory) -> Vec<Change> {
     let mut changes: Vec<Change> = Vec::new();
     // Atomic frame so partial updates never flicker.
     changes.push(Change::Text("\x1b[?2026h".to_string()));
@@ -60,8 +71,11 @@ pub(crate) fn render(
     let cols = app.cols.max(20);
     if app.help {
         render_help(&mut changes, app, cols);
-        term.render(&changes)?;
-        return Ok(());
+
+        // The key reference replaces the panels for the rest of the frame.
+        changes.push(Change::CursorVisibility(CursorVisibility::Hidden));
+        changes.push(Change::Text("\x1b[?2026l".to_string()));
+        return changes;
     }
 
     let left_w = cols / 2;
@@ -146,8 +160,7 @@ pub(crate) fn render(
 
     changes.push(Change::CursorVisibility(CursorVisibility::Hidden));
     changes.push(Change::Text("\x1b[?2026l".to_string()));
-    term.render(&changes)?;
-    term.flush()
+    changes
 }
 
 fn render_panel(
@@ -566,6 +579,42 @@ mod tests {
             dir: SrgbaTuple(0.2, 0.4, 0.8, 1.0),
         };
         App::new(100, 20, palette, "/tmp".to_string())
+    }
+
+    fn frame_text(app: &App) -> String {
+        let mut history = TransferHistory::new();
+        frame_changes(app, &mut history)
+            .iter()
+            .filter_map(|change| match change {
+                Change::Text(text) => Some(text.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Every frame has to close its synchronized update.  The key reference
+    /// used to return early without the closing marker, so pressing `?` set
+    /// the state (the key handler really did run) and the screen never
+    /// changed: it looked like a dead key.
+    #[test]
+    fn every_frame_closes_its_synchronized_update() {
+        let plain = frame_text(&test_app());
+        assert!(plain.starts_with("\x1b[?2026h"), "frame does not open");
+        assert!(
+            plain.ends_with("\x1b[?2026l"),
+            "frame does not close: {:?}",
+            plain
+        );
+
+        let mut app = test_app();
+        app.help = true;
+        let help = frame_text(&app);
+        assert!(help.contains("Kaku SFTP keys"), "help body missing");
+        assert!(
+            help.ends_with("\x1b[?2026l"),
+            "help frame does not close: {:?}",
+            help
+        );
     }
 
     /// A pending connection has to say so: with a silent status row an
