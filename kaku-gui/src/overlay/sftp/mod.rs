@@ -10,6 +10,8 @@ mod input;
 pub(crate) mod registry;
 mod render;
 mod state;
+
+pub(crate) use state::ClipboardWriter;
 mod types;
 
 pub(crate) use state::{join_path, scan_local_tree};
@@ -41,6 +43,8 @@ pub struct SftpOverlayConfig {
     /// Remote directory to start browsing from, when already known.
     pub remote_start: Option<String>,
     pub palette: types::SftpPalette,
+    /// Writes text to the system clipboard (`c c` / `c f`).
+    pub clipboard: Option<state::ClipboardWriter>,
 }
 
 /// Show a downloaded file in Finder.
@@ -63,6 +67,7 @@ pub fn sftp_overlay(
     let size = term.get_screen_size()?;
     let mut app = App::new(size.cols, size.rows, config.palette, config.local_path);
     app.remote_label = config.remote_label.clone();
+    app.clipboard_sink = config.clipboard.clone();
     if let Some(start) = &config.remote_start {
         app.panel_mut(PanelSide::Remote).path = start.clone();
     }
@@ -136,6 +141,9 @@ pub fn sftp_overlay(
                 }
                 OpResult::Connected { session, home } => {
                     app.connecting = None;
+                    if app.remote_home.is_none() {
+                        app.remote_home = Some(home.clone());
+                    }
                     app.session = Some(session.clone());
                     let manager = crate::sftp_transfer::TransferManager::new(session.clone());
                     registry::set_transfers(pane_id, manager.clone());
@@ -166,6 +174,11 @@ pub fn sftp_overlay(
                 } => {
                     if side == PanelSide::Remote {
                         registry::update_cwd(pane_id, &path);
+                        // The first remote listing is the session's
+                        // starting directory: that is what `Z` returns to.
+                        if app.remote_home.is_none() && entries.is_ok() {
+                            app.remote_home = Some(path.clone());
+                        }
                     }
                     let panel = app.panel_mut(side);
                     if panel.path == path || panel.path.is_empty() {

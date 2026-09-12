@@ -99,12 +99,41 @@ fn handle_key(
     app: &mut App,
     ctx: InputContext<'_>,
 ) -> Result<Handled, bool> {
+    let visible = app.visible_rows();
+    let side = app.focus;
+
     if key.modifiers != Modifiers::NONE && key.modifiers != Modifiers::SHIFT {
-        // Ctrl+C quits; other chords pass through untouched.
-        if key.modifiers == Modifiers::CTRL && key.key == KeyCode::Char('c') {
-            return Ok(Handled::Quit);
+        // Ctrl+C quits.  The Ctrl movement keys follow yazi: half and
+        // full page, plus toggle-all for the selection.  Everything else
+        // passes through untouched.
+        if key.modifiers == Modifiers::CTRL {
+            let page = visible.max(1) as i32;
+            let half = (page / 2).max(1);
+            let panel = app.panel_mut(side);
+            match key.key {
+                KeyCode::Char('c') => return Ok(Handled::Quit),
+                KeyCode::Char('u') => panel.move_cursor(-half, visible),
+                KeyCode::Char('d') => panel.move_cursor(half, visible),
+                KeyCode::Char('b') => panel.move_cursor(-page, visible),
+                KeyCode::Char('f') => panel.move_cursor(page, visible),
+                KeyCode::Char('r') => toggle_all(app, side),
+                _ => return Err(false),
+            }
+            return Ok(Handled::Consumed);
         }
         return Err(false);
+    }
+
+    // A pending `g`/`c` prefix is abandoned by any unrelated key, so a
+    // half-typed chord cannot swallow the next keystroke.
+    let completes_prefix = match key.key {
+        KeyCode::Char('g') | KeyCode::Char('c') => true,
+        KeyCode::Char('f') if app.pending_c => true,
+        _ => false,
+    };
+    if !completes_prefix {
+        app.pending_g = false;
+        app.pending_c = false;
     }
 
     // The F1 reference is modal: any key dismisses it.
@@ -117,9 +146,6 @@ fn handle_key(
     if app.input_mode.is_some() {
         return handle_input_line(key, app, ctx);
     }
-
-    let visible = app.visible_rows();
-    let side = app.focus;
 
     match key.key {
         KeyCode::Char('q') | KeyCode::Escape => Ok(Handled::Quit),
@@ -174,6 +200,22 @@ fn handle_key(
             paste_clipboard(app, ctx);
             Ok(Handled::Consumed)
         }
+        // P: paste and overwrite whatever is in the way (yazi's
+        // `paste --force`), instead of asking per conflict.
+        KeyCode::Char('P') => {
+            app.overwrite_all = Some(true);
+            paste_clipboard(app, ctx);
+            Ok(Handled::Consumed)
+        }
+        // Y/X: drop the yank state (yazi's unyank).
+        KeyCode::Char('Y') | KeyCode::Char('X') => {
+            if app.clipboard.take().is_some() {
+                app.set_message("yank cancelled");
+            } else {
+                app.set_message("nothing to cancel");
+            }
+            Ok(Handled::Consumed)
+        }
         // H/L: walk the directory history.
         KeyCode::Char('H') => {
             let panel = app.panel_mut(side);
@@ -197,15 +239,56 @@ fn handle_key(
             }
             Ok(Handled::Consumed)
         }
-        // z: type a path to jump to; / and f: filter the listing.
+        // z: type a path to jump to; / and F: filter the listing.
         KeyCode::Char('z') => {
             app.input_mode = Some(InputMode::JumpTo);
             app.input_line.clear();
             Ok(Handled::Consumed)
         }
-        KeyCode::Char('/') | KeyCode::Char('f') => {
+        // Z: back to the directory the remote session started in.
+        KeyCode::Char('Z') => {
+            match app.remote_home.clone() {
+                Some(home) => {
+                    app.focus = PanelSide::Remote;
+                    app.panel_mut(PanelSide::Remote).path = home.clone();
+                    ctx.req_tx
+                        .send(OpRequest::Ls {
+                            side: PanelSide::Remote,
+                            path: home,
+                        })
+                        .ok();
+                }
+                None => app.set_message("remote home not known yet"),
+            }
+            Ok(Handled::Consumed)
+        }
+        // c c / c f: copy the path or the filename to the clipboard,
+        // like yazi.  Works on the marks when there are any.
+        KeyCode::Char('c') => {
+            if app.pending_c {
+                copy_paths_to_clipboard(app, false);
+                app.pending_c = false;
+            } else {
+                app.pending_c = true;
+                app.set_message("c c copy path · c f copy name");
+            }
+            Ok(Handled::Consumed)
+        }
+        // f: jump to the next entry starting with the next key (yazi's
+        // jump-to-char).  The plain filter moved to / and F.
+        KeyCode::Char('f') if app.pending_c => {
+            copy_paths_to_clipboard(app, true);
+            app.pending_c = false;
+            Ok(Handled::Consumed)
+        }
+        KeyCode::Char('/') | KeyCode::Char('F') => {
             app.input_mode = Some(InputMode::Filter);
             app.input_line = app.panel(side).filter.clone().unwrap_or_default();
+            Ok(Handled::Consumed)
+        }
+        KeyCode::Char('f') => {
+            app.input_mode = Some(InputMode::JumpToChar);
+            app.input_line.clear();
             Ok(Handled::Consumed)
         }
         // F1 and ?: the full key reference (any key closes it).
@@ -262,7 +345,7 @@ fn handle_key(
             ctx.req_tx.send(OpRequest::Ls { side, path }).ok();
             Ok(Handled::Consumed)
         }
-        KeyCode::Function(2) => {
+        KeyCode::Function(2) | KeyCode::Char('r') => {
             start_rename(app);
             Ok(Handled::Consumed)
         }
@@ -270,8 +353,15 @@ fn handle_key(
             transfer_marked(app);
             Ok(Handled::Consumed)
         }
+        // a: create, yazi-style.  A name ending in `/` is a directory,
+        // anything else is an empty file.  F7 keeps making directories.
+        KeyCode::Char('a') => {
+            app.input_mode = Some(InputMode::Create { directory: false });
+            app.input_line.clear();
+            Ok(Handled::Consumed)
+        }
         KeyCode::Function(7) => {
-            app.input_mode = Some(InputMode::Mkdir);
+            app.input_mode = Some(InputMode::Create { directory: true });
             app.input_line.clear();
             Ok(Handled::Consumed)
         }
@@ -377,6 +467,83 @@ fn decide_overwrite(key: KeyCode, app: &mut App) -> Result<Handled, bool> {
     if app.pending.is_empty() {
         app.input_mode = None;
         app.overwrite_all = None;
+    }
+    Ok(Handled::Consumed)
+}
+
+/// A trailing separator in the typed name means "directory" (yazi's `a`).
+fn draws_directory(typed: &str) -> bool {
+    typed.ends_with('/')
+}
+
+/// Invert the selection over the listing, like yazi's Ctrl+r.
+fn toggle_all(app: &mut App, side: PanelSide) {
+    let panel = app.panel_mut(side);
+    let len = panel.entries.len();
+    let previous = std::mem::take(&mut panel.marked);
+    panel.marked = (0..len).filter(|i| !previous.contains(i)).collect();
+    let marked = app.panel(side).marked.len();
+    app.set_message(format!("{marked} selected"));
+}
+
+/// `c c` / `c f`: put the marked paths (or the cursor entry) on the
+/// clipboard, one per line.
+fn copy_paths_to_clipboard(app: &mut App, names_only: bool) {
+    let side = app.focus;
+    let panel = app.panel(side);
+    let dir = panel.path.clone();
+    let targets = panel.action_targets();
+    if targets.is_empty() {
+        app.set_message("nothing to copy");
+        return;
+    }
+    let lines: Vec<String> = targets
+        .iter()
+        .map(|(_, entry)| {
+            if names_only {
+                entry.name.clone()
+            } else {
+                join_path(&dir, &entry.name)
+            }
+        })
+        .collect();
+    let text = lines.join("\n");
+    match &app.clipboard_sink {
+        Some(sink) => {
+            sink(text);
+            app.set_message(format!("copied {} path(s)", lines.len()));
+        }
+        None => app.set_message("clipboard unavailable"),
+    }
+}
+
+/// yazi's `f<char>`: move the cursor to the next entry whose name starts
+/// with the typed character, wrapping around the listing.
+fn handle_jump_to_char(key: &termwiz::input::KeyEvent, app: &mut App) -> Result<Handled, bool> {
+    app.input_mode = None;
+    let KeyCode::Char(needle) = key.key else {
+        return Ok(Handled::Consumed);
+    };
+    let needle = needle.to_ascii_lowercase();
+    let visible = app.visible_rows();
+    let side = app.focus;
+    let panel = app.panel(side);
+    let len = panel.entries.len();
+    if len == 0 {
+        return Ok(Handled::Consumed);
+    }
+    let start = panel.cursor + 1;
+    let found = (0..len).map(|step| (start + step) % len).find(|&idx| {
+        panel.entries[idx]
+            .name
+            .chars()
+            .next()
+            .map(|c| c.to_ascii_lowercase())
+            == Some(needle)
+    });
+    match found {
+        Some(idx) => app.panel_mut(side).jump_to(idx, visible),
+        None => app.set_message(format!("no entry starts with {needle}")),
     }
     Ok(Handled::Consumed)
 }
@@ -693,6 +860,11 @@ pub(crate) fn start_ready_transfers(app: &mut App) {
         }
     }
     app.pending = keep;
+    if app.pending.is_empty() {
+        // The answer has been applied to everything it applied to;
+        // leaving it set would silently overwrite later conflicts.
+        app.overwrite_all = None;
+    }
     if app.input_mode.is_some() {
         return;
     }
@@ -782,6 +954,7 @@ fn handle_input_line(
         Some(InputMode::ConfirmOverwrite) => return handle_confirm_overwrite(key, app),
         Some(InputMode::ConfirmFolder { .. }) => return handle_confirm_folder(key, app, ctx),
         Some(InputMode::JumpTo) => return handle_jump_line(key, app, ctx),
+        Some(InputMode::JumpToChar) => return handle_jump_to_char(key, app),
         Some(InputMode::Filter) => {
             return handle_filter_line(key, app);
         }
@@ -794,13 +967,21 @@ fn handle_input_line(
             let side = app.focus;
             let path = app.panel(side).path.clone();
             match mode {
-                Some(InputMode::Mkdir) => {
+                Some(InputMode::Create { directory }) => {
+                    // A trailing `/` asks for a directory (yazi); F7
+                    // always does.  Read it before the line is trimmed.
+                    let is_dir = directory || draws_directory(&line);
+                    let line = line.trim_end_matches('/').to_string();
                     if line.is_empty() {
-                        app.set_error("directory name is empty");
+                        app.set_error("name is empty");
                     } else {
                         let target = join_path(&path, &line);
                         ctx.req_tx
-                            .send(OpRequest::Mkdir { side, path: target })
+                            .send(OpRequest::Create {
+                                side,
+                                path: target,
+                                is_dir,
+                            })
                             .ok();
                     }
                 }
@@ -1204,6 +1385,247 @@ mod tests {
                 mode: Some(0o644),
             })
             .collect()
+    }
+
+    fn many(app: &mut App, count: usize) {
+        let names: Vec<String> = (0..count).map(|i| format!("f{i:02}.txt")).collect();
+        app.panel_mut(PanelSide::Remote).set_entries(entries(
+            &names.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
+        ));
+    }
+
+    /// Ctrl+d/u and Ctrl+b/f move by half and full pages, like yazi.
+    /// Every Ctrl chord except Ctrl+C used to be dropped on the floor.
+    #[test]
+    fn ctrl_keys_move_by_page() {
+        let mut app = test_app();
+        many(&mut app, 60);
+        app.rows = 25; // visible_rows = 20, so half = 10 and page = 20
+        let visible = app.visible_rows();
+        app.panel_mut(PanelSide::Remote).cursor = 30;
+
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let ctx = InputContext { req_tx: &tx };
+        let ctrl = |c: char| termwiz::input::KeyEvent {
+            key: KeyCode::Char(c),
+            modifiers: Modifiers::CTRL,
+        };
+
+        handle_key(&ctrl('d'), &mut app, ctx).unwrap();
+        assert_eq!(app.panel(PanelSide::Remote).cursor, 30 + visible / 2);
+        handle_key(&ctrl('u'), &mut app, ctx).unwrap();
+        assert_eq!(app.panel(PanelSide::Remote).cursor, 30);
+        handle_key(&ctrl('f'), &mut app, ctx).unwrap();
+        assert_eq!(app.panel(PanelSide::Remote).cursor, 30 + visible);
+        handle_key(&ctrl('b'), &mut app, ctx).unwrap();
+        assert_eq!(app.panel(PanelSide::Remote).cursor, 30);
+    }
+
+    /// Ctrl+r inverts the selection (yazi's toggle_all).
+    #[test]
+    fn ctrl_r_inverts_the_selection() {
+        let mut app = test_app();
+        many(&mut app, 3);
+        app.panel_mut(PanelSide::Remote).marked.insert(0);
+
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let ctx = InputContext { req_tx: &tx };
+        let ctrl_r = termwiz::input::KeyEvent {
+            key: KeyCode::Char('r'),
+            modifiers: Modifiers::CTRL,
+        };
+
+        handle_key(&ctrl_r, &mut app, ctx).unwrap();
+        let marked: Vec<usize> = {
+            let mut v: Vec<usize> = app
+                .panel(PanelSide::Remote)
+                .marked
+                .iter()
+                .copied()
+                .collect();
+            v.sort_unstable();
+            v
+        };
+        assert_eq!(marked, vec![1, 2]);
+
+        handle_key(&ctrl_r, &mut app, ctx).unwrap();
+        let marked: Vec<usize> = app
+            .panel(PanelSide::Remote)
+            .marked
+            .iter()
+            .copied()
+            .collect();
+        assert_eq!(marked, vec![0]);
+    }
+
+    /// Y and X drop the yank state, like yazi's unyank.
+    #[test]
+    fn y_and_x_cancel_the_yank() {
+        let mut app = test_app();
+        app.clipboard = Some(Clipboard {
+            side: PanelSide::Remote,
+            items: vec![("/remote/a.txt".to_string(), false, 1024)],
+            cut: false,
+        });
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let ctx = InputContext { req_tx: &tx };
+
+        for key in ['Y', 'X'] {
+            app.clipboard = Some(Clipboard {
+                side: PanelSide::Remote,
+                items: vec![("/remote/a.txt".to_string(), false, 1024)],
+                cut: true,
+            });
+            let press = termwiz::input::KeyEvent {
+                key: KeyCode::Char(key),
+                modifiers: Modifiers::NONE,
+            };
+            handle_key(&press, &mut app, ctx).unwrap();
+            assert!(app.clipboard.is_none(), "{} left the yank in place", key);
+            assert_eq!(app.message.as_deref(), Some("yank cancelled"));
+        }
+    }
+
+    /// Z jumps back to the directory the remote session started in.
+    #[test]
+    fn z_returns_to_the_remote_home() {
+        let mut app = test_app();
+        app.remote_home = Some("/home/admin".to_string());
+        app.panel_mut(PanelSide::Remote).path = "/home/admin/deep".to_string();
+        app.focus = PanelSide::Local;
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        let ctx = InputContext { req_tx: &tx };
+        let press = termwiz::input::KeyEvent {
+            key: KeyCode::Char('Z'),
+            modifiers: Modifiers::NONE,
+        };
+        handle_key(&press, &mut app, ctx).unwrap();
+
+        assert_eq!(app.panel(PanelSide::Remote).path, "/home/admin");
+        assert_eq!(app.focus, PanelSide::Remote);
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(OpRequest::Ls { side: PanelSide::Remote, path }) if path == "/home/admin"
+        ));
+    }
+
+    /// c c copies paths and c f copies names, one per line, for the marks.
+    #[test]
+    fn c_copies_paths_or_names() {
+        let mut app = test_app();
+        app.panel_mut(PanelSide::Remote)
+            .set_entries(entries(&["a.txt", "b.txt", "c.txt"]));
+        app.panel_mut(PanelSide::Remote).marked.insert(0);
+        app.panel_mut(PanelSide::Remote).marked.insert(2);
+        let copied: std::sync::Arc<std::sync::Mutex<Vec<String>>> =
+            std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sink = copied.clone();
+        app.clipboard_sink = Some(std::sync::Arc::new(move |text: String| {
+            sink.lock().unwrap().push(text);
+        }));
+
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let ctx = InputContext { req_tx: &tx };
+        let press = |key: char| termwiz::input::KeyEvent {
+            key: KeyCode::Char(key),
+            modifiers: Modifiers::NONE,
+        };
+
+        for (key, expected) in [('c', "/remote/a.txt\n/remote/c.txt"), ('f', "a.txt\nc.txt")] {
+            handle_key(&press('c'), &mut app, ctx).unwrap();
+            handle_key(&press(key), &mut app, ctx).unwrap();
+            assert_eq!(copied.lock().unwrap().last().unwrap(), expected);
+            assert!(!app.pending_c);
+        }
+    }
+
+    /// A half-typed chord does not swallow the next keystroke.
+    #[test]
+    fn another_key_drops_the_pending_prefix() {
+        let mut app = test_app();
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let ctx = InputContext { req_tx: &tx };
+        let press = |key: char| termwiz::input::KeyEvent {
+            key: KeyCode::Char(key),
+            modifiers: Modifiers::NONE,
+        };
+
+        handle_key(&press('c'), &mut app, ctx).unwrap();
+        assert!(app.pending_c);
+        handle_key(&press('j'), &mut app, ctx).unwrap();
+        assert!(!app.pending_c);
+        assert_eq!(app.panel(PanelSide::Remote).cursor, 0);
+    }
+
+    /// F filters the listing, f jumps to the next name starting with a
+    /// character (yazi's split of filter and jump-to-char).
+    #[test]
+    fn f_filters_and_letter_f_jumps() {
+        let mut app = test_app();
+        app.panel_mut(PanelSide::Remote).set_entries(entries(&[
+            "alpha.txt",
+            "beta.txt",
+            "bravo.txt",
+        ]));
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let ctx = InputContext { req_tx: &tx };
+        let press = |key: KeyCode| termwiz::input::KeyEvent {
+            key,
+            modifiers: Modifiers::NONE,
+        };
+
+        handle_key(&press(KeyCode::Char('F')), &mut app, ctx).unwrap();
+        assert!(matches!(app.input_mode, Some(InputMode::Filter)));
+        app.input_mode = None;
+
+        app.panel_mut(PanelSide::Remote).cursor = 0;
+        handle_key(&press(KeyCode::Char('f')), &mut app, ctx).unwrap();
+        assert!(matches!(app.input_mode, Some(InputMode::JumpToChar)));
+        handle_key(&press(KeyCode::Char('b')), &mut app, ctx).unwrap();
+        assert_eq!(app.panel(PanelSide::Remote).cursor, 1);
+        assert!(app.input_mode.is_none());
+    }
+
+    /// `a` creates a file unless the typed name ends with `/`; F7 always
+    /// creates a directory.
+    #[test]
+    fn create_follows_the_trailing_slash() {
+        let mut app = test_app();
+        app.focus = PanelSide::Remote;
+        let (tx, rx) = std::sync::mpsc::channel();
+        let ctx = InputContext { req_tx: &tx };
+        let press = |key: KeyCode| termwiz::input::KeyEvent {
+            key,
+            modifiers: Modifiers::NONE,
+        };
+        let type_name = |app: &mut App, name: &str| {
+            for ch in name.chars() {
+                handle_key(&press(KeyCode::Char(ch)), app, ctx).unwrap();
+            }
+            handle_key(&press(KeyCode::Enter), app, ctx).unwrap();
+        };
+
+        handle_key(&press(KeyCode::Char('a')), &mut app, ctx).unwrap();
+        type_name(&mut app, "notes.md");
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(OpRequest::Create { path, is_dir: false, .. }) if path == "/remote/notes.md"
+        ));
+
+        handle_key(&press(KeyCode::Char('a')), &mut app, ctx).unwrap();
+        type_name(&mut app, "docs/");
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(OpRequest::Create { path, is_dir: true, .. }) if path == "/remote/docs"
+        ));
+
+        handle_key(&press(KeyCode::Function(7)), &mut app, ctx).unwrap();
+        type_name(&mut app, "plain");
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(OpRequest::Create { path, is_dir: true, .. }) if path == "/remote/plain"
+        ));
     }
 
     /// `?` opens the key reference, and any key closes it again.

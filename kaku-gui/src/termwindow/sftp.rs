@@ -2,9 +2,10 @@
 //! resolution that decides which ssh session the overlay rides on.
 
 use super::TermWindow;
-use crate::overlay::sftp::{sftp_palette, SftpOverlayConfig};
+use crate::overlay::sftp::{sftp_palette, ClipboardWriter, SftpOverlayConfig};
 use mux::pane::{CachePolicy, Pane};
 use std::sync::Arc;
+use window::{Clipboard, WindowOps};
 
 pub(super) fn toggle_overlay(term: &mut TermWindow, pane: &Arc<dyn Pane>) {
     // The active pane is the OVERLAY pane itself while the browser is
@@ -49,6 +50,16 @@ fn resolve_overlay_config(
     pane: &Arc<dyn Pane>,
 ) -> Option<SftpOverlayConfig> {
     let target = crate::sftp_target::resolve(pane)?;
+    // The overlay has no window handle of its own, so hand it a closure
+    // that writes to the system clipboard for `c c` / `c f`.
+    let clipboard: Option<ClipboardWriter> = term.window.clone().map(|window| {
+        let writer: ClipboardWriter = Arc::new(move |text: String| {
+            for dest in [Clipboard::Clipboard, Clipboard::PrimarySelection] {
+                window.set_clipboard(dest, text.clone());
+            }
+        });
+        writer
+    });
     Some(SftpOverlayConfig {
         session: target.session,
         connect_target: target.connect_target,
@@ -61,6 +72,7 @@ fn resolve_overlay_config(
         // The shell's cwd is still where Finder drops land.
         remote_start: None,
         palette: sftp_palette(term.palette()),
+        clipboard,
     })
 }
 

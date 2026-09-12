@@ -439,3 +439,60 @@ fn channel_writes() -> usize {
         .filter(|line| line.contains("packet: wrote [type=94"))
         .count()
 }
+
+/// `a` over SFTP: create a file or a directory, and refuse to clobber an
+/// existing name (SFTP has no exclusive create, so the check is ours).
+#[test]
+fn create_file_and_directory_on_the_remote() {
+    if !sshd_available() {
+        eprintln!("skipping: no sshd binary");
+        return;
+    }
+    let Some(server) = Server::spawn() else {
+        eprintln!("skipping: could not start sshd");
+        return;
+    };
+    let Some(session) = server.connect() else {
+        eprintln!("skipping: could not authenticate against the test sshd");
+        return;
+    };
+    let sftp = session.sftp();
+    let root = format!("{}", server.tmp.path().join("create").display());
+
+    smol::block_on(async {
+        sftp.create_dir(&root, 0o755).await.unwrap();
+
+        let file = format!("{root}/notes.md");
+        kaku_gui_lib::sftp_transfer::create_remote(&sftp, &file, false)
+            .await
+            .expect("create file");
+        let meta = sftp.metadata(file.as_str()).await.expect("stat new file");
+        assert_eq!(meta.size, Some(0), "a new file must be empty");
+
+        // A second create refuses instead of truncating what is there.
+        let again = kaku_gui_lib::sftp_transfer::create_remote(&sftp, &file, false).await;
+        assert!(again.is_err(), "create clobbered an existing file");
+
+        let dir = format!("{root}/docs");
+        kaku_gui_lib::sftp_transfer::create_remote(&sftp, &dir, true)
+            .await
+            .expect("create directory");
+        let names = sftp_read_dir(&sftp, &root);
+        assert!(names.contains(&"docs".to_string()), "directory missing");
+    });
+
+    // The local twin refuses an existing name too.
+    let work = TempDir::new().unwrap();
+    let existing = work.path().join("here.txt");
+    std::fs::write(&existing, b"keep me").unwrap();
+    let refused = kaku_gui_lib::sftp_transfer::create_local(&existing.display().to_string(), false);
+    assert!(refused.is_err(), "local create truncated an existing file");
+    assert_eq!(std::fs::read(&existing).unwrap(), b"keep me");
+
+    let fresh = work.path().join("fresh.txt");
+    kaku_gui_lib::sftp_transfer::create_local(&fresh.display().to_string(), false).unwrap();
+    assert_eq!(std::fs::read(&fresh).unwrap(), b"");
+    let made_dir = work.path().join("made");
+    kaku_gui_lib::sftp_transfer::create_local(&made_dir.display().to_string(), true).unwrap();
+    assert!(made_dir.is_dir());
+}

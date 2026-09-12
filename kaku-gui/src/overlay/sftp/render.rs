@@ -406,7 +406,13 @@ fn render_input_line(app: &App, mode: &InputMode, cols: usize) -> String {
         }
         _ => {
             let prompt = match mode {
-                InputMode::Mkdir => "New directory: ".to_string(),
+                InputMode::Create { directory } => {
+                    if *directory {
+                        "New directory: ".to_string()
+                    } else {
+                        "New file (end with / for a directory): ".to_string()
+                    }
+                }
                 InputMode::Rename { original } => format!("Rename {original} to: "),
                 InputMode::ConfirmDelete { names } => {
                     if names.len() == 1 {
@@ -475,8 +481,8 @@ fn help_line(app: &App) -> String {
         n => format!(" · {n} marked (u clear)"),
     };
     format!(
-        "y copy · x cut · p paste · / filter · z jump · H/L history · ? help · \
-         F5 transfer · D download · Enter open{marks}{clipboard}"
+        "j/k move · y/x/p copy-cut-paste · a new · r rename · d delete · Space mark · \
+         / filter · f jump · F5 transfer · ? help{marks}{clipboard}"
     )
 }
 
@@ -487,12 +493,15 @@ fn render_help(changes: &mut Vec<Change>, app: &App, cols: usize) {
     let lines = [
         "j/k ↑/↓ move            Tab   switch panel",
         "h/l ←/→ parent / open   Enter open, Space mark",
-        "u clear selection       gg/G  top / bottom",
-        "Ctrl+d/u half page      o open with default app",
-        "D download to ~/Downloads",
-        "/  or f  filter listing  z jumpto a path",
+        "u clear selection       Ctrl+r invert selection",
+        "Ctrl+d/u half page      Ctrl+f/b full page",
+        "gg/G top / bottom       o open with default app",
+        "y copy  x cut  p paste  P paste (overwrite)",
+        "Y / X cancel the yank   D download to ~/Downloads",
+        "a new (name/ = folder)  r rename   d delete",
+        "/  or F  filter listing  f jump to a name, z jump to a path",
+        "c c copy path  c f copy name    Z remote home",
         "H / L    back / forward  . show hidden files",
-        "y copy   x cut   p paste",
         "F5 transfer (folders recurse)   F2 rename",
         "F7 new folder                   F8 delete",
         "mouse: click selects, double click opens",

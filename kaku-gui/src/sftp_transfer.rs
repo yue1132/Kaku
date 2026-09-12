@@ -1444,6 +1444,42 @@ where
 }
 
 /// Human-readable byte count, e.g. `1.4 MB`.
+/// Create an empty file, or a directory, on this machine.  `create_new`
+/// refuses an existing name instead of truncating it, so a typo cannot
+/// silently empty a file.
+pub fn create_local(path: &str, is_dir: bool) -> Result<(), String> {
+    if is_dir {
+        return std::fs::create_dir(path).map_err(|e| e.to_string());
+    }
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+}
+
+/// The same on the remote side.  SFTP has no "create exclusively", so the
+/// presence check comes first: without it `sftp.create` would truncate an
+/// existing file to zero bytes.
+pub async fn create_remote(
+    sftp: &wezterm_ssh::Sftp,
+    path: &str,
+    is_dir: bool,
+) -> Result<(), String> {
+    if is_dir {
+        return sftp
+            .create_dir(path, 0o755)
+            .await
+            .map_err(|e| e.to_string());
+    }
+    if sftp.metadata(path).await.is_ok() {
+        return Err(format!("{path}: already exists"));
+    }
+    let mut file = sftp.create(path).await.map_err(|e| e.to_string())?;
+    file.close().await.map_err(|e| e.to_string())
+}
+
 pub fn format_bytes(bytes: u64) -> String {
     const UNITS: [&str; 6] = ["B", "KB", "MB", "GB", "TB", "PB"];
     let mut value = bytes as f64;

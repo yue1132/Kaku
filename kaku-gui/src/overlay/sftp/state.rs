@@ -267,9 +267,12 @@ pub(crate) enum OpRequest {
         from: String,
         to: String,
     },
-    Mkdir {
+    /// Create a file, or a directory when `is_dir` (yazi's `a`: a
+    /// trailing `/` means directory).
+    Create {
         side: PanelSide,
         path: String,
+        is_dir: bool,
     },
     Delete {
         side: PanelSide,
@@ -289,7 +292,11 @@ pub(crate) enum AuthReply {
 /// Input-line modes overlaying the status row.
 #[derive(Clone, Debug)]
 pub(crate) enum InputMode {
-    Mkdir,
+    /// Create something: a directory always (`F7`), or by the trailing
+    /// slash in the typed name (`a`).
+    Create {
+        directory: bool,
+    },
     Rename {
         original: String,
     },
@@ -313,10 +320,13 @@ pub(crate) enum InputMode {
         side: PanelSide,
         name: String,
     },
-    /// Live substring filter over the current listing (`/` or `f`).
+    /// Live substring filter over the current listing (`/` or `F`).
     Filter,
     /// Type a path to jump to (`z`).
     JumpTo,
+    /// Jump the cursor to the next entry starting with the next key
+    /// (yazi-style `f<char>`).
+    JumpToChar,
 }
 
 /// Paths copied or cut in the browser, waiting for a paste.
@@ -392,7 +402,19 @@ pub(crate) struct App {
     pub cut_pending: Vec<(u64, PanelSide, String, bool)>,
     pub quit: bool,
     pub pending_g: bool,
+    /// `c` was pressed: the next key picks what to copy (`c c` path,
+    /// `c f` filename).
+    pub pending_c: bool,
+    /// Remote directory the session started in, for `Z`.
+    pub remote_home: Option<String>,
+    /// Writes text to the system clipboard; None in tests and when the
+    /// window is gone.
+    pub clipboard_sink: Option<ClipboardWriter>,
 }
+
+/// Writes text to the system clipboard (`c c` / `c f`).  A closure keeps
+/// the overlay independent of the window type that owns the clipboard.
+pub(crate) type ClipboardWriter = std::sync::Arc<dyn Fn(String) + Send + Sync>;
 
 impl App {
     pub fn new(cols: usize, rows: usize, palette: SftpPalette, local_path: String) -> Self {
@@ -427,6 +449,9 @@ impl App {
             last_click: None,
             quit: false,
             pending_g: false,
+            pending_c: false,
+            remote_home: None,
+            clipboard_sink: None,
         }
     }
 
@@ -652,17 +677,17 @@ pub(crate) fn spawn_worker(
                         };
                         let _ = tx.send(OpResult::Mutated { side, outcome });
                     }
-                    OpRequest::Mkdir { side, path } => {
+                    OpRequest::Create { side, path, is_dir } => {
                         let outcome = match side {
-                            PanelSide::Local => {
-                                std::fs::create_dir(&path).map_err(|e| e.to_string())
-                            }
+                            PanelSide::Local => crate::sftp_transfer::create_local(&path, is_dir),
                             PanelSide::Remote => match session_slot.lock().unwrap().clone() {
                                 Some(session) => {
                                     let sftp = session.sftp();
-                                    with_timeout(REMOTE_OP_TIMEOUT, sftp.create_dir(&path, 0o755))
-                                        .map(|r| r.map_err(|e| e.to_string()))
-                                        .unwrap_or_else(|| Err(OP_TIMED_OUT.to_string()))
+                                    with_timeout(
+                                        REMOTE_OP_TIMEOUT,
+                                        crate::sftp_transfer::create_remote(&sftp, &path, is_dir),
+                                    )
+                                    .unwrap_or_else(|| Err(OP_TIMED_OUT.to_string()))
                                 }
                                 None => Err("not connected".to_string()),
                             },
