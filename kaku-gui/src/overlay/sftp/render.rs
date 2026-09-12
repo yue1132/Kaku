@@ -93,18 +93,22 @@ pub(crate) fn render(
         x: Position::Absolute(0),
         y: Position::Absolute(status_row),
     });
-    if let Some(mode) = &app.input_mode {
-        changes.push(Change::AllAttributes(app.palette.title_cell()));
-        changes.push(Change::Text(render_input_line(app, mode, cols)));
-    } else if let Some(err) = &app.error {
-        changes.push(Change::AllAttributes(app.palette.error_cell()));
-        changes.push(Change::Text(truncate_visible(err, cols)));
-    } else if let Some(msg) = &app.message {
-        changes.push(Change::AllAttributes(app.palette.plain_cell()));
-        changes.push(Change::Text(truncate_visible(msg, cols)));
-    } else {
-        changes.push(Change::AllAttributes(app.palette.dim_cell()));
-        changes.push(Change::Text(truncate_visible(&help_line(app), cols)));
+    if let Some(line) = status_line(app) {
+        let (attrs, text) = match &line {
+            StatusLine::Input(_) => (app.palette.title_cell(), None),
+            StatusLine::Connecting(state) => (app.palette.title_cell(), Some(state.to_string())),
+            StatusLine::Error(err) => (app.palette.error_cell(), Some(err.to_string())),
+            StatusLine::Message(msg) => (app.palette.plain_cell(), Some(msg.to_string())),
+            StatusLine::Help(hint) => (app.palette.dim_cell(), Some(hint.clone())),
+        };
+        changes.push(Change::AllAttributes(attrs));
+        match (&line, text) {
+            (StatusLine::Input(mode), _) => {
+                changes.push(Change::Text(render_input_line(app, mode, cols)));
+            }
+            (_, Some(text)) => changes.push(Change::Text(truncate_visible(&text, cols))),
+            (_, None) => {}
+        }
     }
 
     // ── Bottom focus hint row ───────────────────────────────────────
@@ -163,8 +167,15 @@ fn render_panel(
     let label = if side == PanelSide::Remote {
         if app.session.is_some() && !app.remote_label.is_empty() {
             format!(" {}:{} ", app.remote_label, title)
-        } else {
+        } else if app.session.is_some() {
             format!(" remote:{} ", title)
+        } else {
+            // No session yet: say what the panel is waiting for instead of
+            // leaving a blank half with no explanation.
+            match &app.connecting {
+                Some(state) => format!(" {state} "),
+                None => " remote: not connected ".to_string(),
+            }
         }
     } else {
         format!(" {} ", title)
@@ -420,6 +431,34 @@ fn prompt_title(prompt: &str) -> String {
     }
 }
 
+/// What the status row is showing: the active prompt wins, then what a
+/// connection is doing, then the last error, the last message, and
+/// finally the key hints.  Exposed for tests because a silent status row
+/// is what made a pending connection look like an empty directory.
+enum StatusLine<'a> {
+    Input(&'a InputMode),
+    Connecting(&'a str),
+    Error(&'a str),
+    Message(&'a str),
+    Help(String),
+}
+
+fn status_line(app: &App) -> Option<StatusLine<'_>> {
+    if let Some(mode) = &app.input_mode {
+        return Some(StatusLine::Input(mode));
+    }
+    if let Some(state) = &app.connecting {
+        return Some(StatusLine::Connecting(state));
+    }
+    if let Some(err) = &app.error {
+        return Some(StatusLine::Error(err));
+    }
+    if let Some(msg) = &app.message {
+        return Some(StatusLine::Message(msg));
+    }
+    Some(StatusLine::Help(help_line(app)))
+}
+
 fn help_line(app: &App) -> String {
     if app.session.is_none() {
         return "Not connected · j/k move · Tab switch · q quit".to_string();
@@ -497,7 +536,43 @@ fn truncate_visible(text: &str, width: usize) -> String {
 
 #[cfg(test)]
 mod tests {
+    use super::super::types::SftpPalette;
     use super::*;
+    use termwiz::color::SrgbaTuple;
+
+    fn test_app() -> App {
+        let palette = SftpPalette {
+            bg: SrgbaTuple(0.0, 0.0, 0.0, 1.0),
+            fg: SrgbaTuple(1.0, 1.0, 1.0, 1.0),
+            accent: SrgbaTuple(0.5, 0.5, 0.5, 1.0),
+            border: SrgbaTuple(0.3, 0.3, 0.3, 1.0),
+            header: SrgbaTuple(0.4, 0.4, 0.4, 1.0),
+            dir: SrgbaTuple(0.2, 0.4, 0.8, 1.0),
+        };
+        App::new(100, 20, palette, "/tmp".to_string())
+    }
+
+    /// A pending connection has to say so: with a silent status row an
+    /// empty remote panel looks exactly like an empty directory.
+    #[test]
+    fn connection_state_is_visible_in_the_status_row() {
+        let mut app = test_app();
+        assert!(matches!(status_line(&app), Some(StatusLine::Help(_))));
+
+        app.connecting = Some("Connecting to host ...".to_string());
+        assert!(matches!(status_line(&app), Some(StatusLine::Connecting(_))));
+
+        // An active prompt outranks the connection text.
+        app.input_mode = Some(InputMode::Filter);
+        assert!(matches!(status_line(&app), Some(StatusLine::Input(_))));
+        app.input_mode = None;
+
+        // A failure outranks a stale message, and both outrank the hints.
+        app.connecting = None;
+        app.message = Some("older".to_string());
+        app.error = Some("boom".to_string());
+        assert!(matches!(status_line(&app), Some(StatusLine::Error(_))));
+    }
 
     #[test]
     fn truncate_visible_marks_truncation() {

@@ -336,17 +336,22 @@ fn decide_overwrite(key: KeyCode, app: &mut App) -> Result<Handled, bool> {
     match key {
         KeyCode::Char('o') | KeyCode::Enter => {
             app.pending.remove(0);
-            start_front(app, false);
+            start_item(app, &front, false);
         }
         KeyCode::Char('r') if front.resumable() => {
             app.pending.remove(0);
-            start_front(app, true);
+            start_item(app, &front, true);
         }
         KeyCode::Char('s') => {
             app.pending.remove(0);
         }
         KeyCode::Char('a') => {
             app.overwrite_all = Some(true);
+            // The front item starts now and the rest of the queue
+            // follows without another prompt.
+            app.input_mode = None;
+            start_ready_transfers(app);
+            return Ok(Handled::Consumed);
         }
         KeyCode::Char('x') => {
             app.overwrite_all = Some(false);
@@ -365,14 +370,14 @@ fn decide_overwrite(key: KeyCode, app: &mut App) -> Result<Handled, bool> {
     Ok(Handled::Consumed)
 }
 
-fn start_front(app: &mut App, resume: bool) {
+/// Start one queued transfer.  The queue is the caller's business: this
+/// used to shift `pending` as well, so an answer consumed two entries
+/// and panicked on a one-item queue.
+fn start_item(app: &mut App, item: &PendingTransfer, resume: bool) {
     let Some(manager) = app.transfers.clone() else {
         return;
     };
-    if let Some(item) = app.pending.first().cloned() {
-        start_and_note(&manager, app, &item, resume);
-    }
-    app.pending.remove(0);
+    start_and_note(&manager, app, item, resume);
 }
 
 /// Folder recursive-transfer confirmation.  Keys: y/Enter scan and
@@ -404,15 +409,18 @@ fn handle_confirm_folder(
                     cut_source: request.cut_source,
                 })
                 .ok();
+            // The walk is in flight now, so the request has to leave the
+            // prompt queue: otherwise the same folder is asked for again
+            // once the scan returns and `y` queues it a second time.
+            app.scan_queue.remove(0);
         }
     } else {
         app.scan_queue.remove(0);
     }
-    if app.scan_queue.is_empty() {
-        app.input_mode = None;
-    } else if let Some(request) = app.scan_queue.first() {
-        app.input_mode = Some(folder_prompt(request));
-    }
+    // Whatever is queued next owns the prompt: another folder, a
+    // conflict, or nothing at all.
+    app.input_mode = None;
+    start_ready_transfers(app);
     Ok(Handled::Consumed)
 }
 
@@ -648,7 +656,11 @@ pub(crate) fn direction_between(from: PanelSide, to: PanelSide) -> crate::sftp_t
 /// conflicting ones behind a confirmation prompt.
 pub(crate) fn start_ready_transfers(app: &mut App) {
     let Some(manager) = app.transfers.clone() else {
+        // Without a connection nothing can start; drop the queue *and* the
+        // answer, so a stale "overwrite all" cannot silently skip the
+        // next prompt.
         app.pending.clear();
+        app.overwrite_all = None;
         return;
     };
     let mut keep: Vec<PendingTransfer> = Vec::new();
@@ -1107,6 +1119,116 @@ mod tests {
 
     /// Which way a paste goes decides which engine call runs; getting it
     /// wrong is how the earlier F5 download bug happened.
+    /// Queue transfers that all conflict with an existing destination.
+    fn conflicting(app: &mut App, names: &[&str]) {
+        for name in names {
+            app.pending.push(PendingTransfer {
+                direction: Direction::Download,
+                source: format!("/remote/{name}"),
+                dest: format!("/tmp/{name}"),
+                size: 4096,
+                dest_size: Some(2048),
+                cut_source: false,
+            });
+        }
+        app.input_mode = Some(InputMode::ConfirmOverwrite);
+    }
+
+    /// Confirming a folder walk takes the request off the prompt queue.
+    /// Otherwise the scan comes back while the old prompt is still up, the
+    /// same folder is asked for again, and a second `y` queues it twice.
+    #[test]
+    fn folder_confirmation_clears_the_prompt() {
+        let mut app = test_app();
+        let request = |root: &str| ScanRequest {
+            side: PanelSide::Local,
+            root: root.to_string(),
+            dest: "/remote".to_string(),
+            dest_side: PanelSide::Remote,
+            cut_source: false,
+        };
+        let (tx, rx) = std::sync::mpsc::channel();
+        let ctx = InputContext { req_tx: &tx };
+        let press = |key: KeyCode| termwiz::input::KeyEvent {
+            key,
+            modifiers: Modifiers::NONE,
+        };
+
+        app.scan_queue.push(request("/tmp/photos"));
+        app.input_mode = Some(folder_prompt(app.scan_queue.first().unwrap()));
+        handle_confirm_folder(&press(KeyCode::Char('y')), &mut app, ctx).unwrap();
+        assert!(app.scan_queue.is_empty(), "confirmed folder stayed queued");
+        assert!(app.input_mode.is_none(), "prompt survived the answer");
+        assert!(matches!(rx.try_recv(), Ok(OpRequest::ScanTree { .. })));
+
+        // Rejecting the next folder also leaves nothing behind.
+        app.scan_queue.push(request("/tmp/other"));
+        app.input_mode = Some(folder_prompt(app.scan_queue.first().unwrap()));
+        handle_confirm_folder(&press(KeyCode::Char('n')), &mut app, ctx).unwrap();
+        assert!(app.scan_queue.is_empty());
+        assert!(app.input_mode.is_none());
+        assert!(
+            rx.try_recv().is_err(),
+            "a rejected folder was still scanned"
+        );
+    }
+
+    /// One answer consumes exactly one queued transfer.  The queue used to
+    /// be consumed twice per answer: it started the *second* entry by
+    /// mistake and panicked with "removal index (is 0) should be < len (is
+    /// 0)" on a one-item queue, which killed the overlay thread behind a
+    /// frozen prompt that ignored every later key.
+    #[test]
+    fn one_answer_consumes_one_queued_transfer() {
+        let mut app = test_app();
+        conflicting(&mut app, &["a.bin", "b.bin"]);
+
+        decide_overwrite(KeyCode::Char('o'), &mut app).unwrap();
+        assert_eq!(app.pending.len(), 1);
+        assert_eq!(app.pending[0].dest, "/tmp/b.bin");
+        assert!(matches!(app.input_mode, Some(InputMode::ConfirmOverwrite)));
+
+        decide_overwrite(KeyCode::Char('s'), &mut app).unwrap();
+        assert!(app.pending.is_empty());
+        assert!(app.input_mode.is_none());
+    }
+
+    /// The one-item queue is the exact shape that panicked.
+    #[test]
+    fn a_single_conflict_answers_without_panicking() {
+        let mut app = test_app();
+        conflicting(&mut app, &["only.bin"]);
+
+        decide_overwrite(KeyCode::Char('o'), &mut app).unwrap();
+        assert!(app.pending.is_empty());
+        assert!(app.input_mode.is_none());
+    }
+
+    /// "overwrite all" has to clear the prompt itself: nothing is left to
+    /// conflict with, so the queue would stay parked behind an empty
+    /// prompt.
+    #[test]
+    fn overwrite_all_clears_the_prompt() {
+        let mut app = test_app();
+        conflicting(&mut app, &["a.bin", "b.bin"]);
+
+        decide_overwrite(KeyCode::Char('a'), &mut app).unwrap();
+        assert!(app.pending.is_empty());
+        assert!(app.input_mode.is_none());
+        assert!(app.overwrite_all.is_none());
+    }
+
+    /// "skip all" drops the whole queue and the prompt with it.
+    #[test]
+    fn skip_all_clears_the_prompt() {
+        let mut app = test_app();
+        conflicting(&mut app, &["a.bin", "b.bin"]);
+
+        decide_overwrite(KeyCode::Char('x'), &mut app).unwrap();
+        assert!(app.pending.is_empty());
+        assert!(app.input_mode.is_none());
+    }
+
     #[test]
     fn paste_direction_follows_the_two_sides() {
         use crate::sftp_transfer::Direction;
