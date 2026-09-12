@@ -1294,7 +1294,14 @@ pub fn derive_command_from_key_assignment(action: &KeyAssignment) -> Option<Comm
         ShowDebugOverlay => CommandDef {
             brief: "Kaku Doctor".into(),
             doc: "Run kaku doctor in the current pane".into(),
-            keys: vec![(Modifiers::CTRL.union(Modifiers::SHIFT), "l".into())],
+            // Not Ctrl+Shift+L: `permute_keys` synthesizes that chord from
+            // Cmd+L (AI Chat), so the AI chat already owned it.
+            keys: vec![(
+                Modifiers::SUPER
+                    .union(Modifiers::ALT)
+                    .union(Modifiers::SHIFT),
+                "d".into(),
+            )],
             args: &[ArgType::ActiveWindow],
             menubar: &["Shell"],
             icon: None,
@@ -1386,11 +1393,13 @@ pub fn derive_command_from_key_assignment(action: &KeyAssignment) -> Option<Comm
         }) => CommandDef {
             brief: "Move Pane to New Tab".into(),
             doc: "Move selected pane to a new tab".into(),
+            // Cmd+Shift+Alt+T belongs to "Restore Previous Window"; M keeps
+            // the advanced move family next to the Window sibling below.
             keys: vec![(
                 Modifiers::SUPER
                     .union(Modifiers::ALT)
                     .union(Modifiers::SHIFT),
-                "t".into(),
+                "m".into(),
             )],
             args: &[ArgType::ActivePane],
             menubar: &["Window"],
@@ -2164,7 +2173,9 @@ pub fn derive_command_from_key_assignment(action: &KeyAssignment) -> Option<Comm
         ActivateLastTab => CommandDef {
             brief: "Last Active Tab".into(),
             doc: "Switch to last active tab".into(),
-            keys: vec![(Modifiers::SUPER.union(Modifiers::SHIFT), "t".into())],
+            // Cmd+Shift+T belongs to "Reopen Last Closed Tab"; this command
+            // is registered later and had been silently winning it.
+            keys: vec![(Modifiers::SUPER.union(Modifiers::ALT), "t".into())],
             args: &[ArgType::ActiveWindow],
             menubar: &["Window"],
             icon: None,
@@ -2775,8 +2786,7 @@ mod tests {
             for (mods, key) in &cmd.keys {
                 let bare = mods.remove_positional_mods();
                 let is_reload_chord = matches!(key, KeyCode::Char('r') | KeyCode::Char('R'))
-                    && bare.contains(Modifiers::SUPER)
-                    && bare.contains(Modifiers::SHIFT);
+                    && bare == Modifiers::SUPER | Modifiers::SHIFT;
                 assert!(
                     !is_reload_chord,
                     "{} takes Cmd+Shift+R, the configuration reload chord",
@@ -2792,20 +2802,8 @@ mod tests {
     /// config from the keyboard quietly stopped working.
     ///
     /// Chords are normalized the way the config does it, so `SHIFT+Char('t')`
-    /// and `Char('T')` count as the same chord.
-    ///
-    /// The three entries below predate this guard.  Each needs a user-visible
-    /// decision (which command keeps the chord), so they are named here
-    /// rather than silently tolerated; any other shared chord fails.
-    const KNOWN_SHARED_CHORDS: &[&str] = &[
-        // "Restore Previous Window" vs "Move Pane to New Tab".
-        "ALT | SUPER+Char('T')",
-        // "Reopen Last Closed Tab" vs "Activate Last Tab".
-        "SUPER+Char('T')",
-        // AI chat (config default) vs "Kaku Doctor" (Rust default); the one
-        // registered later wins, so one of them is unreachable today.
-        "CTRL+Char('L')",
-    ];
+    /// and `Char('T')` count as the same chord, and the `permute_keys`
+    /// variants (Cmd+x also claims Ctrl+Shift+X) are all included.
 
     #[test]
     fn default_chords_are_not_shared() {
@@ -2817,7 +2815,7 @@ mod tests {
             let (key, mods) = key.normalize_shift(mods);
             let chord = format!("{mods:?}+{key:?}");
             if let Some(previous) = seen.get(&chord) {
-                if previous != &action && !KNOWN_SHARED_CHORDS.contains(&chord.as_str()) {
+                if previous != &action {
                     shared.push(format!("{chord} -> {previous:?} and {action:?}"));
                 }
             }
