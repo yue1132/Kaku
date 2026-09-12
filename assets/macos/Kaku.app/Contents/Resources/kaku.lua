@@ -2358,14 +2358,20 @@ local function normalize_ssh_target(target)
     return nil
   end
 
-  local at = host:match(".*@(.+)$")
-  if at and at ~= "" then
-    host = at
+  -- Keep the user@ part.  The sshfs mount and its BatchMode preflight have
+  -- to log in as the same user the pane did; dropping it made "ssh
+  -- admin@host" mount as the local default user, so every write into the
+  -- remote home came back as permission denied.
+  local user = ""
+  local user_part, host_part = host:match("^([^@]+@)(.+)$")
+  if user_part then
+    user = user_part
+    host = host_part
   end
 
   local bracketed = host:match("^%[([^%]]+)%]")
   if bracketed and bracketed ~= "" then
-    return bracketed
+    return user .. bracketed
   end
 
   local maybe_host, maybe_port = host:match("^(.*):(%d+)$")
@@ -2376,7 +2382,7 @@ local function normalize_ssh_target(target)
   if host == "" then
     return nil
   end
-  return host
+  return user .. host
 end
 
 local function ssh_target_from_tokens(tokens)
@@ -2785,6 +2791,22 @@ local function remote_open_path(mount_path, remote_cwd)
   return mount_path
 end
 
+local function mount_accepts_writes(mount_path)
+  -- macFUSE hands back mounts that refuse every write (old sshfs builds on
+  -- macFUSE 4+), and Yazi only reports that on the first save.  /tmp is
+  -- world-writable on essentially every Unix host, so a create that comes
+  -- back as a permission error means the mount itself is read-only.
+  local probe = mount_path .. "/tmp/.kaku-write-probe-" .. tostring(os.time())
+  local ok, _, stderr = run_process({ "/usr/bin/touch", probe })
+  if ok then
+    run_process({ "/bin/rm", "-f", probe })
+    return true
+  end
+
+  local message = trim_surrounding_whitespace(stderr)
+  return not (message:find("permitted", 1, true) or message:find("Permission denied", 1, true))
+end
+
 local function open_remote_files(window, pane)
   pane = resolve_active_pane(window, pane)
   if not pane then
@@ -2820,6 +2842,14 @@ local function open_remote_files(window, pane)
   if not mount_ok then
     show_remote_files_toast(window, "Mount failed: " .. mount_or_err, 6000)
     return
+  end
+
+  if not mount_accepts_writes(mount_path) then
+    show_remote_files_toast(
+      window,
+      "Mounted read-only: this sshfs build cannot write here. Use Cmd+Shift+R for the built-in browser.",
+      9000
+    )
   end
 
   local open_path = remote_open_path(mount_or_err, pane_cwd(pane))
