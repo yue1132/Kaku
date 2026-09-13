@@ -252,8 +252,6 @@ async fn spawn_tab_in_domain_if_mux_is_empty(
     startup_trace::mark("  mux.new_empty_window done (notification fired)");
 
     let config = config::configuration();
-    // 中文界面：只在 config.language 指定了支持的语言时生效（本仓库分支功能）。
-    i18n::init(&config.language);
     config.update_ulimit()?;
 
     startup_trace::mark("  domain.attach start");
@@ -1041,6 +1039,9 @@ fn run() -> anyhow::Result<()> {
     startup_trace::mark("common_init() done");
     stats::Stats::init()?;
     let config = config::configuration();
+    // 中文界面：配置与日志都就绪后、任何界面之前初始化一次。
+    // 只能在这里调用——放到窗口创建路径上会在「会话恢复」时被提前 return 跳过。
+    i18n::init(&config.language);
     if let Some(value) = &config.default_ssh_auth_sock {
         std::env::set_var("SSH_AUTH_SOCK", value);
     }

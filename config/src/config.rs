@@ -586,14 +586,14 @@ pub struct Config {
     #[dynamic(default)]
     pub selection_wheel_scroll_behavior: SelectionWheelScrollBehavior,
 
-    /// Deprecated and ignored. The i18n support was removed and Kaku's
-    /// built-in UI is English-only. Kept as a deprecated field (rather than
-    /// dropped) so that `kaku.lua` files carrying `config.language` from
-    /// V0.11.0 still load on upgrade with a warning instead of a hard error.
-    #[dynamic(
-        default,
-        deprecated = "config.language names the UI language; only locales shipped in assets/i18n are translated, others fall back to English"
-    )]
+    /// UI language for the built-in interface on the `zh-ui` branch.
+    ///
+    /// Empty (the default) keeps every string in English, exactly like
+    /// upstream. A locale that ships a table in `assets/i18n` (currently
+    /// `zh-CN`) is translated at the display points; any other value falls
+    /// back to English. Users can extend or override the table from
+    /// `~/.config/kaku/i18n/<locale>.toml` without touching the code.
+    #[dynamic(default)]
     pub language: String,
 
     #[dynamic(try_from = "crate::units::PixelUnit", default = "default_half_cell")]
